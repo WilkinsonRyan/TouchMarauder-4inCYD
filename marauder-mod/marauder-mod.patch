@@ -1,0 +1,87 @@
+diff --git a/esp32_marauder/CommandLine.cpp b/esp32_marauder/CommandLine.cpp
+index f960bd5..522581f 100644
+--- a/esp32_marauder/CommandLine.cpp
++++ b/esp32_marauder/CommandLine.cpp
+@@ -9,7 +9,7 @@ void CommandLine::RunSetup() {
+   Serial.println(F("\n\n--------------------------------\n"));
+   Serial.println(F("         ESP32 Marauder      \n"));
+   Serial.println("            " + version_number + "\n");
+-  Serial.println(F("       By: justcallmekoko\n"));
++  Serial.println(F(" Brayden's Tubular Marauder + TouchBoard Mod\n"));
+   Serial.println(F("--------------------------------\n\n"));
+   
+   Serial.print("> ");
+diff --git a/esp32_marauder/MenuFunctions.cpp b/esp32_marauder/MenuFunctions.cpp
+index 835788f..30cfa5c 100644
+--- a/esp32_marauder/MenuFunctions.cpp
++++ b/esp32_marauder/MenuFunctions.cpp
+@@ -3,6 +3,8 @@
+ //#include "icons.h"
+ #include "configs.h"
+ #include "TouchDrvGT911.hpp"
++#include "esp_ota_ops.h"      // TouchBoard mod: jump to the TouchBoard app slot
++#include "esp_partition.h"
+ 
+ TouchDrvGT911 touch;
+ 
+@@ -1797,6 +1799,13 @@ void MenuFunctions::RunSetup()
+   this->addNodes(&mainMenu, text_table1[9], TFTBLUE, NULL, DEVICE, [this]() {
+     this->changeMenu(&deviceMenu);
+   });
++  this->addNodes(&mainMenu, "TouchBoard", TFTORANGE, NULL, DEVICE, []() {
++    // Dual-boot: point the bootloader at the TouchBoard app (ota_1) and reboot.
++    const esp_partition_t* p = esp_partition_find_first(
++        ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, NULL);
++    if (p) esp_ota_set_boot_partition(p);
++    ESP.restart();
++  });
+   this->addNodes(&mainMenu, text_table1[30], TFTLIGHTGREY, NULL, REBOOT, []() {
+     ESP.restart();
+   });
+diff --git a/esp32_marauder/configs.h b/esp32_marauder/configs.h
+index c0ff889..2c14f88 100644
+--- a/esp32_marauder/configs.h
++++ b/esp32_marauder/configs.h
+@@ -22,7 +22,7 @@
+   //#define MARAUDER_REV_FEATHER
+   //// END BOARD TARGETS
+ 
+-  #define MARAUDER_VERSION "v1.4.3"
++  #define MARAUDER_VERSION "v1.1"
+ 
+   #define GRAPH_REFRESH 100
+ 
+@@ -128,12 +128,12 @@
+     #define HAS_FULL_SCREEN
+     #define HAS_SD
+     #define USE_SD
+-    #define HAS_GPS
++    //#define HAS_GPS   // TouchBoard mod: no GPS module attached (matches nogps release); GPS init hung boot
+     //#define CYD_22CAP
+     //#define CYD_24
+     //#define CYD_24G
+-    //#define CYD_24CAP
+-    #define CYD_28
++    #define CYD_24CAP
++    //#define CYD_28
+     //#define CYD_32
+     //#define CYD_32CAP
+     //#define CYD_35
+diff --git a/esp32_marauder/esp32_marauder.ino b/esp32_marauder/esp32_marauder.ino
+index 7a007ac..69cc648 100644
+--- a/esp32_marauder/esp32_marauder.ino
++++ b/esp32_marauder/esp32_marauder.ino
+@@ -203,9 +203,10 @@ void setup()
+   backlightOff();
+ 
+   #ifdef HAS_SCREEN
+-    display_obj.tft.drawCentreString("ESP32 Marauder", TFT_WIDTH / 2, TFT_HEIGHT * 0.33, 1);
+-    display_obj.tft.drawCentreString("JustCallMeKoko", TFT_WIDTH / 2, TFT_HEIGHT * 0.5, 1);
+-    display_obj.tft.drawCentreString(display_obj.version_number, TFT_WIDTH / 2, TFT_HEIGHT * 0.66, 1);
++    display_obj.tft.drawCentreString("ESP32 Marauder", TFT_WIDTH / 2, TFT_HEIGHT * 0.30, 1);
++    display_obj.tft.drawCentreString("Brayden's Tubular Marauder", TFT_WIDTH / 2, TFT_HEIGHT * 0.44, 1);
++    display_obj.tft.drawCentreString("+ TouchBoard Mod", TFT_WIDTH / 2, TFT_HEIGHT * 0.55, 1);
++    display_obj.tft.drawCentreString(display_obj.version_number, TFT_WIDTH / 2, TFT_HEIGHT * 0.68, 1);
+   #endif
+ 
+   backlightOn();
