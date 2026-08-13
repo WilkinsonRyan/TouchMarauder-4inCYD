@@ -1,54 +1,72 @@
-# The Marauder half
+# The Marauder half (4″ ST7796)
 
-This is **not** a copy of ESP32 Marauder. It's a handful of edits on top of
+This is **not** a copy of ESP32 Marauder. It's a set of edits on top of
 [Fr4nkFletcher's CYD fork](https://github.com/Fr4nkFletcher/ESP32-Marauder-Cheap-Yellow-Display)
-(itself a fork of [justcallmekoko's Marauder](https://github.com/justcallmekoko/ESP32Marauder)),
-captured as [`marauder-mod.patch`](marauder-mod.patch). Everything here is GPL-3.0
-(see [`LICENSE`](LICENSE)) because Marauder is.
+**v1.4.3** (itself a fork of [justcallmekoko's Marauder](https://github.com/justcallmekoko/ESP32Marauder)).
+Everything here is **GPL-3.0** (see [`LICENSE`](LICENSE)) because Marauder is.
 
-## What the patch changes
+The changed files live in [`esp32_marauder/`](esp32_marauder/); the added display
+fonts live in [`fonts/`](fonts/). Drop them onto a clean Fr4nkFletcher v1.4.3
+checkout (see "Building it" below).
 
-- **Board:** `CYD_28` → `CYD_24CAP` — the 2.4" capacitive panel.
-- **Version + branding:** `v1.4.3` → `v1.1`, and the boot screen + serial banner
-  now say *"Brayden's Tubular Marauder + TouchBoard Mod"* instead of the stock
-  credit. (Wardriving CSVs keep `brand=JustCallMeKoko` so wigle.net uploads still
-  parse — that's a data field, not vanity.)
+## What changed vs stock v1.4.3
+
+- **Board target:** `CYD_35` — selected via `MARAUDER_V4` in `configs.h` — the
+  4″ ST7796 320×480 **resistive** (XPT2046) panel.
+- **A theme engine** (`ui_theme`: Light / Dark / Hacker / Pride) with a
+  **Toggle Theme** submenu, persisted to NVS. `itemColor()` / `themeOutline()`
+  drive per-theme menu colors (Pride = HSV rainbow spread; Hacker = neon green),
+  and `drawThemeGlyph()` draws procedural Hacker/Pride icons.
+- **Hacker "Matrix" rain** behind the menus (`stepHackerRain()` /
+  `restampHackerMenu()`), plus a **splash** on theme-select and boot
+  (`matrixSplash()`).
+- **A dimmed idle screensaver** (`runScreensaver()`) after ~25s no-touch — themed
+  animation + cycling word-wrapped quotes, 40% brightness, tap to wake.
+- **Brightness control** — LEDC PWM backlight on `TFT_BL` (GPIO 27), `±10%`,
+  in Settings. `applyBrightness()` / display prefs in `esp32_marauder.ino`.
+- **On-screen touch calibration** ("Calibrate Touch"), stored in NVS.
+- **UI overhaul** — JetBrains Mono menu font, full-width tappable rows with
+  separators, marquee for over-long labels, on-screen ▲▼ scroll arrows.
+- **AP Mimic menu launcher** — `WIFI_ATTACK_MIMIC` was handled in `WiFiScan.cpp`
+  but had no menu button; added one under WiFi → Attacks.
 - **New main-menu tile: `TouchBoard`** — sets the boot partition to `ota_1` and
   reboots into the keyboard.
-- **GPS off** — no GPS module on this board, and GPS init hung the boot. This is
-  effectively the `nogps` build.
-- **NimBLE bond namespace** → `mrdr_bond` so Marauder and TouchBoard stop
-  clobbering each other's Bluetooth keys in NVS (that was the boot-loop).
+- **GPS off** — no GPS module on this board; GPS init hung the boot. `HAS_GPS`
+  stays undefined (effectively the `nogps` build).
+- **NimBLE bond namespace** kept separate so Marauder and TouchBoard don't
+  clobber each other's Bluetooth keys in NVS.
 
-## Building it (the part that fights back)
+## Building it
 
 Marauder v1.4.3 was written against the **old ESP32 core (2.0.x)** — it uses WiFi
-internals that core 3.x deleted. So:
+internals that core 3.x removed. So:
 
-- **esp32 core `2.0.17`** (not 3.x, and not "2.0.18" — that only exists in
-  Arduino's Nano fork). Install it isolated if you don't want to downgrade your
-  main setup: `ARDUINO_DIRECTORIES_DATA=/some/scratch arduino-cli core install esp32:esp32@2.0.17`.
-- **Libraries:** the ones bundled in the upstream fork's `/libraries`. The one
-  that matters most is TFT_eSPI — use the **`2.4C`** variant from `TFT_eSPI-CYD/`,
-  not the parent folder (it ships a dozen board-specific TFT_eSPI copies and the
-  compiler will grab the wrong one). Also needed: `bb_captouch`, `SensorLib`,
-  `lv_arduino`, `NimBLE-Arduino` (1.3.5), `LinkedList`, `ArduinoJson`,
-  `JPEGDecoder`, `Adafruit_NeoPixel`, `AsyncTCP`, `ESPAsyncWebServer`,
-  `MicroNMEA`, `EspSoftwareSerial`, `Adafruit_MAX1704X`, `Adafruit_BusIO`.
-- **FQBN:** `esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M,PSRAM=disabled,CPUFreq=240,FlashFreq=80,FlashMode=dio`
-- **One extra link flag:** `compiler.c.elf.extra_flags=-Wl,--allow-multiple-definition`.
-  Marauder defines a pile of globals and helper functions right in its headers,
-  which the newer linker rightly hates. The definitions are identical across
-  every translation unit, so "keep the first" is safe here.
+- **esp32 core `2.0.17`** (not 3.x). Install it isolated if you don't want to
+  disturb your main setup:
+  `ARDUINO_DIRECTORIES_DATA=/some/scratch arduino-cli core install esp32:esp32@2.0.17`
+- **TFT_eSPI:** use the **`3.5R`** variant from the upstream fork's
+  `libraries/TFT_eSPI-CYD/3.5R/` as your `TFT_eSPI` (the fork ships a dozen
+  board-specific copies — the compiler will grab the wrong one otherwise). Then:
+  - add the four `fonts/JetBrainsMono*pt7b.h` here into TFT_eSPI's
+    `Fonts/GFXFF/` and `#include` them from `gfxfont.h`;
+  - in `User_Setup.h`, **comment out `TFT_BL` / `TFT_BACKLIGHT_ON`** so TFT_eSPI
+    stops driving the backlight pin and the LEDC PWM brightness control works.
+- **Partition scheme:** `min_spiffs` (this is the dual-app layout — Marauder in
+  `app0`, TouchBoard in `app1`).
+- **One extra link flag:**
+  `compiler.c.elf.extra_flags=-Wl,--allow-multiple-definition` (Marauder defines
+  globals in headers; identical across translation units, so "keep the first" is
+  safe).
 
 Roughly:
 
 ```sh
 git clone https://github.com/Fr4nkFletcher/ESP32-Marauder-Cheap-Yellow-Display
 cd ESP32-Marauder-Cheap-Yellow-Display
-git apply /path/to/marauder-mod.patch
-# point --libraries at the bundled libs (with the 2.4C TFT_eSPI as "TFT_eSPI")
-arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize=4M,PSRAM=disabled" \
+# copy this folder's esp32_marauder/*.{cpp,h,ino} over esp32_marauder/,
+# add fonts/*.h into the 3.5R TFT_eSPI GFXFF, comment TFT_BL in User_Setup.h
+arduino-cli compile \
+  --fqbn "esp32:esp32:esp32:PartitionScheme=min_spiffs,FlashSize=4M,PSRAM=disabled,CPUFreq=240,FlashFreq=80,FlashMode=dio" \
   --libraries ./build_libs \
   --build-property "compiler.c.elf.extra_flags=-Wl,--allow-multiple-definition" \
   esp32_marauder
@@ -56,20 +74,21 @@ arduino-cli compile --fqbn "esp32:esp32:esp32:PartitionScheme=huge_app,FlashSize
 
 ## Flashing just this half
 
-The prebuilt binary is `../firmware/marauder_v1.1_touchboard-mod.bin`. It goes in
-**app0**, and you flash *only* that region so TouchBoard in app1 survives:
+Flash **only** the app0 region so TouchBoard in app1 survives:
 
 ```sh
 python3 -m esptool --chip esp32 -p /dev/cu.usbserial-XXXX -b 460800 \
-  write_flash --flash_size keep 0x10000 ../firmware/marauder_v1.1_touchboard-mod.bin
+  write_flash --flash_size keep 0x10000 esp32_marauder/build/esp32_marauder.ino.bin
 ```
 
-Full blank-board procedure (both apps + partition table): see
-[`../firmware/FLASH.md`](../firmware/FLASH.md).
+(Clearing otadata — `erase_region 0xe000 0x2000` — makes it boot straight into
+Marauder afterward.)
 
-## If it boot-loops
+## If it misbehaves
 
-- **Stack smash right after `Sensor type = CST820`** → NVS bond collision. Wipe
-  it: `esptool erase_region 0x9000 0x5000` then `erase_region 0xe000 0x2000`.
-- **Hangs after the battery check** → GPS is on. Turn `HAS_GPS` off in `configs.h`.
-- **Wrong colors / garbage screen** → wrong TFT_eSPI variant. Use `2.4C`.
+- **Boot-loop / stack smash after touch init** → NVS bond collision. Wipe:
+  `esptool erase_region 0x9000 0x5000` then `erase_region 0xe000 0x2000`.
+- **Hangs after the battery check** → GPS is on. Keep `HAS_GPS` undefined.
+- **Wrong colors / garbage screen** → wrong TFT_eSPI variant. Use `3.5R`.
+- **Backlight brightness does nothing** → `TFT_BL` still defined in
+  `User_Setup.h`; comment it out.

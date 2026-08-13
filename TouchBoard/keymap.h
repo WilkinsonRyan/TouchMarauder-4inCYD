@@ -17,6 +17,17 @@ enum : uint8_t {
   ACT_BT_ADV,        // BT screen: restart advertising
   ACT_BT_CLEAR,      // BT screen: forget all bonds
   ACT_EXIT_MARAUDER, // BT screen: reboot into the Marauder app (ota_0)
+  ACT_BT_SETTINGS,   // BT screen: open the display-settings sub-screen
+  ACT_BRIGHT_UP,     // settings: brightness +10%
+  ACT_BRIGHT_DN,     // settings: brightness -10%
+  ACT_THEME_TOGGLE,  // (legacy) settings: switch dark/light theme
+  ACT_BT_BACK,       // settings: back to the BT info screen
+  ACT_OPEN_THEMES,   // settings: open the theme picker
+  ACT_THEMES_BACK,   // theme picker: back to settings
+  ACT_SET_LIGHT,     // theme picker: pick Light
+  ACT_SET_DARK,      // theme picker: pick Dark
+  ACT_SET_HACKER,    // theme picker: pick Hacker
+  ACT_SET_PRIDE,     // theme picker: pick Pride
 };
 
 // Single-byte label codes the renderer draws as shapes instead of text

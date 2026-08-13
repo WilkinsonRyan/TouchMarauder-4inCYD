@@ -1,8 +1,15 @@
 # TouchBoard
 
-A BLE HID keyboard built on the **ESP32-2432S024C** (2.4" capacitive-touch
-"Cheap Yellow Display"). Pairs with phones, laptops, tablets, and TVs as a
-real hardware keyboard. Five views, switched by the tab bar at the top:
+> **This is the 4″ port.** TouchBoard was created by
+> [hord-brayden](https://github.com/hord-brayden/TouchMarauder) for the 2.4″
+> capacitive board. This copy is rebuilt for the **4″ ST7796 320×480 resistive
+> CYD** (ESP32-3248S035R, XPT2046 touch) and adds the theme engine + idle
+> screensaver described at the end. The keyboard logic below (T9 engine, HID
+> timing, pairing, ghost-touch handling) is hord-brayden's and is board-agnostic.
+
+A BLE HID keyboard on the **4″ ST7796 resistive "Cheap Yellow Display"**. Pairs
+with phones, laptops, tablets, and TVs as a real hardware keyboard. Five views,
+switched by the tab bar at the top:
 
 | Tab | View |
 |-----|------|
@@ -86,20 +93,21 @@ Onboard RGB LED: **blinking blue** = advertising (discoverable), **green** = con
 
 ## Build setup
 
-Tested with **esp32 core 3.3.10** (already installed on this machine).
+Tested with **esp32 core 3.3.11**.
 
-Libraries (already cloned into `~/Documents/Arduino/libraries/`):
+Libraries:
 - **NimBLE-Arduino 2.5.0** — the HID code uses the NimBLE **2.x** API
-  (`getInputReport`, `setReportMap`, ...). It will NOT compile against 1.x.
-  Don't downgrade: 2.3.4 compiled fine but boot-looped on esp32 core 3.3.10
-  with `assert failed: npl_freertos_mutex_pend` inside `createServer()` —
-  the library and core versions must be recent *together*.
-- **LovyanGFX 1.2.7** — display driver, configured entirely in `display.h`.
+  (`getInputReport`, `setReportMap`, ...). It will NOT compile against 1.x, and
+  the library + core versions must be recent *together*.
+- **LovyanGFX 1.2.7** — display + touch driver, configured entirely in
+  `display.h` as **`Panel_ST7796`** + **`Touch_XPT2046`** sharing the display's
+  HSPI bus (CS on GPIO 33).
 
 Arduino IDE settings:
 - Board: **ESP32 Dev Module**
-- Partition Scheme: **Huge APP (3MB No OTA)** — the sketch currently fits the
-  default scheme too, but BLE + graphics grows fast; this buys headroom.
+- Partition Scheme: **min_spiffs** — this is the dual-app layout; TouchBoard
+  lives in `app1` / `ota_1` (flash offset `0x1f0000`) so Marauder in `app0`
+  survives. (Standalone, Huge APP works too.)
 - Everything else: defaults.
 
 Or from the command line:
@@ -133,8 +141,8 @@ keyboard back.
 ```
 TouchBoard.ino   setup/loop: touch polling, status LED
 config.h         all pins, BLE name, touch orientation flags
-display.h        LovyanGFX panel config (ILI9341, HSPI, backlight PWM)
-touch.h/.cpp     raw-I2C CST820 capacitive touch driver
+display.h        LovyanGFX panel config (ST7796 + XPT2046, shared HSPI, PWM)
+touch.h/.cpp     XPT2046 resistive touch via LovyanGFX getTouch() + press filter
 hidkb.h/.cpp     BLE HID keyboard on NimBLE 2.x (report map, pairing, bonds)
 keymap.h         all key layouts as data tables (HID usage IDs + layout units)
 ui.h/.cpp        rendering, hit testing, view/layer state machine
@@ -155,13 +163,13 @@ the top-left corner logs near `0,0` and bottom-right logs near `319,239`.
 
 ## Known issues / hardware gotchas
 
-- **R vs C variant.** The 2432S024 ships with capacitive (CST820, this code)
-  or resistive (XPT2046, different bus, different driver) touch. If serial
-  says `no CST8xx touch controller at 0x15`, you have the R variant.
-- **Display controller variance.** Most C boards are ILI9341. If colors look
-  inverted set `cfg.invert = true`; if red/blue swap set `cfg.rgb_order = true`
-  (both in `display.h`). If the image is garbage, the panel may be an ST7789 —
-  swap `Panel_ILI9341` for `Panel_ST7789` in the same file.
+- **This port targets the resistive 4″ board** (ST7796 + XPT2046). Touch and
+  display are configured in `display.h`; if colors look inverted set
+  `cfg.invert = true`, if red/blue swap set `cfg.rgb_order = true`.
+- **Sections below that mention CST820 / ILI9341 / GPIO 21 INT** are from
+  hord-brayden's original 2.4″ capacitive build. On this 4″ port touch is
+  XPT2046 read through LovyanGFX (`touch.cpp`), calibrated by the raw-ADC
+  `x_min/x_max/y_min/y_max` values in `display.h` (Y is swapped to un-flip).
 - **One host at a time.** It bonds to multiple hosts but connects to one.
   Real multi-device keyboards do bond-slot switching — feasible later
   (directed advertising per stored bond) but not implemented.
@@ -182,3 +190,19 @@ the top-left corner logs near `0,0` and bottom-right logs near `319,239`.
 - Macro keys / text snippets view
 - Multi-host bond slots with a host-switcher on the BT screen
 - Backlight dim on idle (LDR on GPIO 34 could auto-adjust)
+
+## Added in the 4″ port (WilkinsonRyan)
+
+On top of hord-brayden's keyboard, this build adds a shared interface layer
+(`ui.cpp`), matching the Marauder half:
+
+- **Theme picker** — BT tab → Settings → **Toggle Theme**: Light / Dark /
+  **Hacker** (black + neon-green, outlined keys, live Matrix rain behind the
+  keyboard) / **Pride** (every key a different rainbow color, galaxy-style).
+  Persisted to NVS (namespace `tbdisp`, separate from Marauder's).
+- **Brightness +/−** and a live **Theme** readout on the Settings screen.
+- **Idle screensaver** — after ~25s untouched, dims to 40% and plays the themed
+  animation (Matrix rain / rainbow "raining men") with cycling word-wrapped
+  quotes; tap to wake.
+- **Orientation** flipped 180° so it matches the Marauder half on this board.
+

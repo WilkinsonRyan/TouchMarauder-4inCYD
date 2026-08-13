@@ -1,5 +1,6 @@
 //
-// TouchBoard — BLE HID keyboard on an ESP32-2432S024C touchscreen.
+// TouchBoard — BLE HID keyboard on the 4" ST7796 CYD (ESP32-3248S035R,
+// resistive). Ported from hord-brayden's original 2.4" ESP32-2432S024C build.
 //
 // Views (tab bar at top): QWERTY keyboard / numpad / nav+arrows / Bluetooth.
 // Pairs as a real hardware keyboard with any BLE HID host (phone, laptop, TV).
@@ -44,7 +45,7 @@ void setup() {
   digitalWrite(PIN_LED_B, HIGH);
 
   tft.init();
-  tft.setRotation(2);        // portrait, 240x320 — USB-C down, matches Marauder
+  tft.setRotation(0);        // portrait, flipped 180° to match Marauder's orientation
   tft.setBrightness(200);
 
   touch_begin();

@@ -1,6 +1,12 @@
 MIT License
 
-Copyright (c) 2026 Brayden Anthony H.
+Copyright (c) 2026 Brayden Anthony H. (TouchBoard, original TouchMarauder mod)
+Copyright (c) 2026 WilkinsonRyan (4" ST7796 port, theme engine, screensaver,
+                    brightness, and UI additions)
+
+The Marauder-derived code in marauder-mod/ is licensed separately under GPL-3.0
+(see marauder-mod/LICENSE); this MIT license covers TouchBoard and this repo's
+own glue only.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

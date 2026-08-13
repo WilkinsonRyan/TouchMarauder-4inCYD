@@ -15,11 +15,14 @@
 //
 #include <Arduino.h>
 #include <ctype.h>
+#include <math.h>            // fmodf/fabsf for the Pride rainbow
+#include <Preferences.h>     // persist theme + brightness in NVS
 #include "ui.h"
 #include "config.h"
 #include "display.h"
 #include "hidkb.h"
 #include "keymap.h"
+#include "touch.h"           // touch_read() for the screensaver wake
 #include "esp_ota_ops.h"     // dual-boot: hand off to the Marauder app slot
 #include "esp_partition.h"
 
@@ -40,16 +43,109 @@ static const int T9_ADVANCE = 13;
 static const int T9_ENTER   = 14;
 
 // ---------------- palette (RGB565) ----------------
-static const uint16_t COL_BG       = 0x10A2;
-static const uint16_t COL_KEY      = 0x39E7;
-static const uint16_t COL_KEY_SPEC = 0x29A6;
-static const uint16_t COL_KEY_DOWN = 0x04F3;
-static const uint16_t COL_TEXT     = 0xFFFF;
-static const uint16_t COL_TAB      = 0x2104;
-static const uint16_t COL_TAB_ON   = 0x04F3;
-static const uint16_t COL_OK       = 0x07E8;
-static const uint16_t COL_ADV      = 0x04DF;
-static const uint16_t COL_DIM      = 0x8C71;
+// Mutable so the theme picker (BT > Settings > Toggle Theme) can re-skin the UI.
+// applyTheme() loads one set; every draw function reads these live.
+static uint16_t COL_BG, COL_KEY, COL_KEY_SPEC, COL_KEY_DOWN, COL_TEXT,
+                COL_TAB, COL_TAB_ON, COL_OK, COL_ADV, COL_DIM;
+
+// ---------------- theme + display prefs (NVS ns "tbdisp") ----------------
+enum { TB_LIGHT = 0, TB_DARK = 1, TB_HACKER = 2, TB_PRIDE = 3 };
+static uint8_t theme         = TB_DARK;   // default: the original dark skin
+static uint8_t brightnessPct = 80;        // 10..100
+
+static inline bool prideOn() { return theme == TB_PRIDE; }
+
+// HSV (h 0..360, s/v 0..1) -> RGB565, for the Pride rainbow keys.
+static uint16_t hsv565(float h, float s, float v) {
+  float c = v * s, x = c * (1 - fabsf(fmodf(h / 60.0f, 2.0f) - 1)), m = v - c, r, g, b;
+  if      (h <  60) { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else              { r = c; g = 0; b = x; }
+  uint8_t R = (uint8_t)((r + m) * 255), G = (uint8_t)((g + m) * 255), B = (uint8_t)((b + m) * 255);
+  return ((R & 0xF8) << 8) | ((G & 0xFC) << 3) | (B >> 3);
+}
+
+// Rainbow fill for a key centred at (cx,cy) within a content box (x0,y0,W,H):
+// a diagonal spread from red at the top-left to violet at the bottom-right.
+// The box is the view's real key area (not the whole screen) so the corners
+// actually reach the ends of the spectrum — keys are inset, so we also stretch
+// the fraction slightly so the corner-most keys hit true red / violet.
+static uint16_t prideKeyColor(int cx, int cy, int x0, int y0, int W, int H) {
+  float fx = (float)(cx - x0) / W;
+  float fy = (float)(cy - y0) / H;
+  float f  = (fx + fy) * 0.5f;                  // 0..1 diagonal
+  float hue = (f - 0.12f) * (300.0f / 0.76f);   // stretch: 0.12->0 (red), 0.88->300 (violet)
+  if (hue < 0)   hue = 0;
+  if (hue > 300) hue = 300;
+  return hsv565(hue, 0.95f, 1.0f);
+}
+
+// Outline colour for clear key separation in Dark (white) / Hacker (neon-green).
+// Light and Pride already separate via fill contrast, so they get none.
+static void keyOutlineRect(int x, int y, int w, int h, int r) {
+  if      (theme == TB_DARK)   tft.drawRoundRect(x, y, w, h, r, 0xFFFF);
+  else if (theme == TB_HACKER) tft.drawRoundRect(x, y, w, h, r, 0x07E0);
+}
+
+static const char* themeName(uint8_t t) {
+  switch (t) { case TB_LIGHT: return "Light"; case TB_HACKER: return "Hacker";
+               case TB_PRIDE: return "Pride"; default: return "Dark"; }
+}
+
+static void applyTheme() {
+  switch (theme) {
+    case TB_LIGHT:   // black text reads on every key state
+      COL_BG=0xFFFF; COL_KEY=0xC618; COL_KEY_SPEC=0x9CD3; COL_KEY_DOWN=0x8E5F;
+      COL_TEXT=0x0000; COL_TAB=0xBDD7; COL_TAB_ON=0x1C9F; COL_OK=0x0480;
+      COL_ADV=0x001F; COL_DIM=0x528A; break;
+    case TB_HACKER:  // black bg + black (outline-only) keys so the rain shows through, neon-green text
+      COL_BG=0x0000; COL_KEY=0x0000; COL_KEY_SPEC=0x0000; COL_KEY_DOWN=0x03E0;
+      COL_TEXT=0x07E0; COL_TAB=0x1082; COL_TAB_ON=0x07E0; COL_OK=0x07E0;
+      COL_ADV=0x07FF; COL_DIM=0x0560; break;
+    case TB_PRIDE:   // galaxy: black bg, per-key rainbow (below), white text
+      COL_BG=0x0000; COL_KEY=0x39E7; COL_KEY_SPEC=0x29A6; COL_KEY_DOWN=0x0000;
+      COL_TEXT=0xFFFF; COL_TAB=0x0000; COL_TAB_ON=0xFFFF; COL_OK=0x07E0;
+      COL_ADV=0x07FF; COL_DIM=0xC618; break;
+    default:         // TB_DARK (original)
+      COL_BG=0x10A2; COL_KEY=0x39E7; COL_KEY_SPEC=0x29A6; COL_KEY_DOWN=0x04F3;
+      COL_TEXT=0xFFFF; COL_TAB=0x2104; COL_TAB_ON=0x04F3; COL_OK=0x07E8;
+      COL_ADV=0x04DF; COL_DIM=0x8C71; break;
+  }
+}
+
+static void applyBrightness() {
+  tft.setBrightness((uint16_t)brightnessPct * 255 / 100);
+}
+
+static void savePrefs() {
+  Preferences p; p.begin("tbdisp", false);
+  p.putUChar("theme", theme);
+  p.putUChar("bright", brightnessPct);
+  p.end();
+}
+
+static void loadPrefs() {
+  Preferences p; p.begin("tbdisp", true);
+  uint8_t def = p.getBool("dark", true) ? TB_DARK : TB_LIGHT;   // migrate old bool
+  theme = p.getUChar("theme", def);
+  if (theme > TB_PRIDE) theme = TB_DARK;
+  brightnessPct = p.getUChar("bright", 80);
+  p.end();
+  if (brightnessPct < 10) brightnessPct = 10;    // guard against a bad stored value
+  if (brightnessPct > 100) brightnessPct = 100;
+}
+
+static void adjustBrightness(int delta) {
+  int v = (int)brightnessPct + delta;
+  if (v < 10)  v = 10;
+  if (v > 100) v = 100;
+  brightnessPct = (uint8_t)v;
+  applyBrightness();
+  savePrefs();
+}
 
 // ---------------- state ----------------
 static ViewId curView = VIEW_KB;
@@ -80,16 +176,46 @@ static ActiveKey down = { nullptr, 0, 0, 0, 0, -1, false };
 static bool lastConn  = false;
 static int  lastBonds = -1;
 
+static uint32_t ss_last_activity = 0;   // idle-screensaver timer (declared early: used in ui_onTouchDown)
+static int      ss_drop[64];
+
 static const char* TAB_LABELS[VIEW_COUNT] = { "T9", "123", "nav", "QWE", "BT" };
 
-// BT screen buttons (stacked, portrait)
-static const KeyDef BT_BTN_ADV   = { "Re-advertise",     0, 0, ACT_BT_ADV,        1 };
-static const KeyDef BT_BTN_CLEAR = { "Forget hosts",     0, 0, ACT_BT_CLEAR,      1 };
-static const KeyDef BT_BTN_EXIT  = { "Exit to Marauder", 0, 0, ACT_EXIT_MARAUDER, 1 };
-static const int BT_BTN_X = 20, BT_BTN_W = 200, BT_BTN_H = 40;
-static const int BT_BTN1_Y = SCREEN_H - 150;  // Re-advertise
-static const int BT_BTN2_Y = SCREEN_H - 104;  // Forget hosts
-static const int BT_BTN3_Y = SCREEN_H - 58;   // Exit to Marauder (dual-boot)
+// BT screen buttons (stacked, portrait). Full-width now (was a 200px column
+// sized for the 2.4" CYD); four evenly-spaced slots hold both the info-screen
+// buttons and the settings-screen buttons.
+static const KeyDef BT_BTN_ADV      = { "Re-advertise",     0, 0, ACT_BT_ADV,        1 };
+static const KeyDef BT_BTN_CLEAR    = { "Forget hosts",     0, 0, ACT_BT_CLEAR,      1 };
+static const KeyDef BT_BTN_SETTINGS = { "Settings",         0, 0, ACT_BT_SETTINGS,   1 };
+static const KeyDef BT_BTN_EXIT     = { "Exit to Marauder", 0, 0, ACT_EXIT_MARAUDER, 1 };
+
+// Settings sub-screen buttons ("Toggle Theme" now opens the theme picker)
+static const KeyDef ST_BTN_BR_UP = { "Brightness +", 0, 0, ACT_BRIGHT_UP,   1 };
+static const KeyDef ST_BTN_BR_DN = { "Brightness -", 0, 0, ACT_BRIGHT_DN,   1 };
+static const KeyDef ST_BTN_THEME = { "Toggle Theme", 0, 0, ACT_OPEN_THEMES, 1 };
+static const KeyDef ST_BTN_BACK  = { "Back",         0, 0, ACT_BT_BACK,     1 };
+
+// Theme-picker sub-screen buttons (Light/Dark/Hacker/Pride + Back)
+static const KeyDef TH_BTN_LIGHT  = { "Light Theme",  0, 0, ACT_SET_LIGHT,   1 };
+static const KeyDef TH_BTN_DARK   = { "Dark Theme",   0, 0, ACT_SET_DARK,    1 };
+static const KeyDef TH_BTN_HACKER = { "Hacker Theme", 0, 0, ACT_SET_HACKER,  1 };
+static const KeyDef TH_BTN_PRIDE  = { "Pride Theme",  0, 0, ACT_SET_PRIDE,   1 };
+static const KeyDef TH_BTN_BACK   = { "Back",         0, 0, ACT_THEMES_BACK, 1 };
+
+static const int BT_BTN_X = 12, BT_BTN_W = SCREEN_W - 24, BT_BTN_H = 40;
+// Four slots stacked up from the bottom (pitch 46) for info/settings screens.
+static const int BT_BTN_Y[4] = { SCREEN_H - 196, SCREEN_H - 150, SCREEN_H - 104, SCREEN_H - 58 };
+// Five slots down from the top for the theme picker.
+static const int TH_BTN_Y[5] = { AREA_Y + 40, AREA_Y + 92, AREA_Y + 144, AREA_Y + 196, AREA_Y + 248 };
+
+// Which button occupies each slot, per screen.
+static const KeyDef* const BT_INFO_BTNS[4] = { &BT_BTN_ADV, &BT_BTN_CLEAR, &BT_BTN_SETTINGS, &BT_BTN_EXIT };
+static const KeyDef* const BT_SET_BTNS[4]  = { &ST_BTN_BR_UP, &ST_BTN_BR_DN, &ST_BTN_THEME, &ST_BTN_BACK };
+static const KeyDef* const TH_BTNS[5]      = { &TH_BTN_LIGHT, &TH_BTN_DARK, &TH_BTN_HACKER, &TH_BTN_PRIDE, &TH_BTN_BACK };
+
+// BT tab has three sub-screens.
+enum { BTS_INFO = 0, BTS_SETTINGS, BTS_THEMES };
+static uint8_t btScreen = BTS_INFO;
 
 static const ViewDef* currentViewDef() {
   switch (curView) {
@@ -164,7 +290,9 @@ static void drawT9Key(int idx, bool pressed) {
   t9CellRect(idx, x, y, w, h);
   bool spec = (idx >= 12 || idx == T9_CASE_KEY);
   uint16_t bg = pressed ? COL_KEY_DOWN : (spec ? COL_KEY_SPEC : COL_KEY);
+  if (prideOn() && !pressed) bg = prideKeyColor(x + w / 2, y + h / 2, 0, AREA_Y, SCREEN_W, AREA_H);
   tft.fillRoundRect(x + KEY_GAP, y + KEY_GAP, w - 2 * KEY_GAP, h - 2 * KEY_GAP, 6, bg);
+  keyOutlineRect(x + KEY_GAP, y + KEY_GAP, w - 2 * KEY_GAP, h - 2 * KEY_GAP, 6);
 
   int cx = x + w / 2, cy = y + h / 2;
   if (idx == T9_BKSP)    { drawGlyph(cx, cy, 6, COL_TEXT); return; }
@@ -283,10 +411,14 @@ static void t9TouchUp() {
 static void drawTabs() {
   for (int i = 0; i < VIEW_COUNT; i++) {
     bool on = (i == (int)curView);
-    tft.fillRect(i * TAB_W, 0, TAB_W, TAB_H, on ? COL_TAB_ON : COL_TAB);
+    // Pride: inactive tabs get their own rainbow colour; the active tab stays
+    // white (COL_TAB_ON) so it still reads as "selected".
+    uint16_t tb = on ? COL_TAB_ON
+                     : (prideOn() ? hsv565((float)i / (VIEW_COUNT - 1) * 300.0f, 0.95f, 1.0f) : COL_TAB);
+    tft.fillRect(i * TAB_W, 0, TAB_W, TAB_H, tb);
     tft.setTextDatum(textdatum_t::middle_center);
     tft.setFont(&fonts::FreeSansBold9pt7b);
-    tft.setTextColor(on ? COL_BG : COL_TEXT, on ? COL_TAB_ON : COL_TAB);
+    tft.setTextColor(on ? COL_BG : COL_TEXT, tb);
     tft.drawString(TAB_LABELS[i], i * TAB_W + TAB_W / 2, TAB_H / 2);
   }
 }
@@ -295,7 +427,9 @@ static void drawTabs() {
 static void drawKey(const KeyDef* k, int x, int y, int w, int h, bool pressed) {
   uint16_t bg = pressed ? COL_KEY_DOWN
               : (k->action != ACT_NONE ? COL_KEY_SPEC : COL_KEY);
+  if (prideOn() && !pressed) bg = prideKeyColor(x + w / 2, y + h / 2, 0, AREA_Y, SCREEN_W, AREA_H);
   tft.fillRoundRect(x + KEY_GAP, y + KEY_GAP, w - 2 * KEY_GAP, h - 2 * KEY_GAP, 6, bg);
+  keyOutlineRect(x + KEY_GAP, y + KEY_GAP, w - 2 * KEY_GAP, h - 2 * KEY_GAP, 6);
 
   int cx = x + w / 2, cy = y + h / 2;
   if (k->label[0] != 0 && k->label[0] < 0x08) {
@@ -362,10 +496,13 @@ static void switchToApp(esp_partition_subtype_t sub, const char* name) {
 
 // ---------------- BT info screen ----------------
 static void drawBTButton(const KeyDef* k, int y, bool pressed) {
-  tft.fillRoundRect(BT_BTN_X, y, BT_BTN_W, BT_BTN_H, 8, pressed ? COL_KEY_DOWN : COL_KEY_SPEC);
+  uint16_t bg = pressed ? COL_KEY_DOWN : COL_KEY_SPEC;
+  if (prideOn() && !pressed) bg = prideKeyColor(BT_BTN_X + BT_BTN_W / 2, y + BT_BTN_H / 2, BT_BTN_X, AREA_Y, BT_BTN_W, AREA_H);
+  tft.fillRoundRect(BT_BTN_X, y, BT_BTN_W, BT_BTN_H, 8, bg);
+  keyOutlineRect(BT_BTN_X, y, BT_BTN_W, BT_BTN_H, 8);
   tft.setTextDatum(textdatum_t::middle_center);
   tft.setFont(&fonts::FreeSansBold9pt7b);
-  tft.setTextColor(COL_TEXT, pressed ? COL_KEY_DOWN : COL_KEY_SPEC);
+  tft.setTextColor(COL_TEXT, bg);
   tft.drawString(k->label, BT_BTN_X + BT_BTN_W / 2, y + BT_BTN_H / 2);
 }
 
@@ -393,9 +530,37 @@ static void drawBTView() {
   tft.setTextColor(COL_DIM, COL_BG);
   tft.drawString(String("Paired hosts: ") + hidkb_bondCount(), 12, AREA_Y + 96);
 
-  drawBTButton(&BT_BTN_ADV,   BT_BTN1_Y, false);
-  drawBTButton(&BT_BTN_CLEAR, BT_BTN2_Y, false);
-  drawBTButton(&BT_BTN_EXIT,  BT_BTN3_Y, false);
+  for (int i = 0; i < 4; i++) drawBTButton(BT_INFO_BTNS[i], BT_BTN_Y[i], false);
+}
+
+// ---------------- BT > Settings (display prefs) ----------------
+static void drawBTSettings() {
+  tft.fillRect(0, AREA_Y, SCREEN_W, AREA_H, COL_BG);
+
+  tft.setTextDatum(textdatum_t::top_left);
+  tft.setFont(&fonts::FreeSansBold12pt7b);
+  tft.setTextColor(COL_TEXT, COL_BG);
+  tft.drawString("Display", 12, AREA_Y + 8);
+
+  tft.setFont(&fonts::FreeSans9pt7b);
+  tft.setTextColor(COL_DIM, COL_BG);
+  tft.drawString(String("Brightness: ") + brightnessPct + "%", 12, AREA_Y + 40);
+  tft.drawString(String("Theme: ") + themeName(theme), 12, AREA_Y + 64);
+
+  for (int i = 0; i < 4; i++) drawBTButton(BT_SET_BTNS[i], BT_BTN_Y[i], false);
+}
+
+// ---------------- BT > Settings > Theme picker ----------------
+static void drawBTThemes() {
+  tft.fillRect(0, AREA_Y, SCREEN_W, AREA_H, COL_BG);
+
+  tft.setTextDatum(textdatum_t::top_left);
+  tft.setFont(&fonts::FreeSansBold12pt7b);
+  tft.setTextColor(COL_TEXT, COL_BG);
+  tft.drawString("Theme", 12, AREA_Y + 8);
+
+  // Buttons render in the *active* theme's style (so tapping one previews it live).
+  for (int i = 0; i < 5; i++) drawBTButton(TH_BTNS[i], TH_BTN_Y[i], false);
 }
 
 // ---------------- QWERTY (landscape) ----------------
@@ -403,7 +568,7 @@ static void drawBTView() {
 // mode: a full keyboard, and the ONLY screen that flips the panel to landscape
 // (320x240). Enter from the QWE tab; the on-key "abc" button drops back to
 // portrait T9.
-static const int LAND_W = 320, LAND_H = 240;
+static const int LAND_W = 480, LAND_H = 320;   // 4" ST7796 landscape (was 320x240)
 static const int QW_ROWS = 4;
 
 static CaseMode qwCase = CASE_LOWER;      // tap shift: one-shot -> CAPS lock -> off
@@ -447,8 +612,10 @@ static void drawQKey(int r, int c, bool pressed) {
   int x, y, w, h; qKeyRect(r, c, x, y, w, h);
   bool spec = (k.type != QK_CHAR);
   uint16_t bg = pressed ? COL_KEY_DOWN : (spec ? COL_KEY_SPEC : COL_KEY);
+  if (prideOn() && !pressed) bg = prideKeyColor(x + w / 2, y + h / 2, 0, 0, LAND_W, LAND_H);
   if (k.type == QK_SHIFT && qwCase != CASE_LOWER && !pressed) bg = COL_TAB_ON;  // lit: shift or caps
   tft.fillRoundRect(x + KEY_GAP, y + KEY_GAP, w - 2 * KEY_GAP, h - 2 * KEY_GAP, 6, bg);
+  keyOutlineRect(x + KEY_GAP, y + KEY_GAP, w - 2 * KEY_GAP, h - 2 * KEY_GAP, 6);
   tft.setTextDatum(textdatum_t::middle_center);
   tft.setTextColor(COL_TEXT, bg);
   char cap[8];
@@ -471,15 +638,15 @@ static void drawQwerty() {
       drawQKey(r, c, false);
 }
 
-// The panel always reports portrait raw (tx 0..239, ty 0..319) regardless of
-// display rotation. This maps it into the setRotation(1) landscape frame.
-// Derived to match the confirmed portrait mapping, so it should land aligned.
-// If keys read mirrored: swap to lx=ty, ly=239-tx AND setRotation(3).
+// LovyanGFX's XPT2046 touch auto-rotates with the display, so in the
+// setRotation(1) landscape frame tx/ty are ALREADY landscape screen coords —
+// pass them straight through. (The old manual portrait->landscape rotation was
+// needed only because the 2.4" board's capacitive chip didn't rotate.)
+// If keys read mirrored/off in landscape, try setRotation(3) in drawView(), or
+// mirror here: lx = LAND_W-1-tx and/or ly = LAND_H-1-ty.
 static void qwertyMap(int tx, int ty, int& lx, int& ly) {
-  lx = 319 - ty;
-  ly = tx;
-  lx = constrain(lx, 0, LAND_W - 1);
-  ly = constrain(ly, 0, LAND_H - 1);
+  lx = constrain(tx, 0, LAND_W - 1);
+  ly = constrain(ty, 0, LAND_H - 1);
 }
 
 static bool qKeyAt(int lx, int ly, int& rr, int& cc) {
@@ -495,7 +662,7 @@ static bool qKeyAt(int lx, int ly, int& rr, int& cc) {
 static void qwertyExit() {          // back to portrait T9
   qwCase = CASE_LOWER;
   qwDownRow = qwDownCol = -1;
-  tft.setRotation(2);
+  tft.setRotation(0);
   curView = VIEW_KB;
   drawView();
 }
@@ -533,12 +700,17 @@ static void qwertyTouchUp() {
 
 // ---------------- full redraw ----------------
 static void drawView() {
-  if (curView == VIEW_QWERTY) { tft.setRotation(1); drawQwerty(); return; }
-  tft.setRotation(2);          // every other screen is portrait
+  if (curView == VIEW_QWERTY) { tft.setRotation(3); drawQwerty(); return; }  // landscape (flipped)
+  tft.setRotation(0);          // every other screen is portrait (flipped 180° to match Marauder)
   drawTabs();
   drawStrip();
   if (curView == VIEW_KB) { drawT9View(); return; }
-  if (curView == VIEW_BT) { drawBTView(); return; }
+  if (curView == VIEW_BT) {
+    if      (btScreen == BTS_THEMES)   drawBTThemes();
+    else if (btScreen == BTS_SETTINGS) drawBTSettings();
+    else                               drawBTView();
+    return;
+  }
 
   tft.fillRect(0, AREA_Y, SCREEN_W, AREA_H, COL_BG);
   const ViewDef* v = currentViewDef();
@@ -551,6 +723,7 @@ static void drawView() {
 
 // ---------------- input handling ----------------
 void ui_onTouchDown(int tx, int ty) {
+  ss_last_activity = millis();   // reset the screensaver idle timer
   if (curView == VIEW_QWERTY) { qwertyTouchDown(tx, ty); return; }  // landscape, own coords
 
   down = { nullptr, 0, 0, 0, 0, -1, false };
@@ -565,12 +738,16 @@ void ui_onTouchDown(int tx, int ty) {
 
   if (curView == VIEW_KB) { t9TouchDown(tx, ty); return; }
 
-  // BT screen buttons
+  // BT screen buttons (info / settings / theme-picker sub-screens)
   if (curView == VIEW_BT) {
     if (tx >= BT_BTN_X && tx < BT_BTN_X + BT_BTN_W) {
-      if (ty >= BT_BTN1_Y && ty < BT_BTN1_Y + BT_BTN_H)      { down.k = &BT_BTN_ADV;   down.y = BT_BTN1_Y; }
-      else if (ty >= BT_BTN2_Y && ty < BT_BTN2_Y + BT_BTN_H) { down.k = &BT_BTN_CLEAR; down.y = BT_BTN2_Y; }
-      else if (ty >= BT_BTN3_Y && ty < BT_BTN3_Y + BT_BTN_H) { down.k = &BT_BTN_EXIT;  down.y = BT_BTN3_Y; }
+      const KeyDef* const* slots;  const int* ys;  int nslots;
+      if (btScreen == BTS_THEMES)        { slots = TH_BTNS;      ys = TH_BTN_Y; nslots = 5; }
+      else if (btScreen == BTS_SETTINGS) { slots = BT_SET_BTNS;  ys = BT_BTN_Y; nslots = 4; }
+      else                               { slots = BT_INFO_BTNS; ys = BT_BTN_Y; nslots = 4; }
+      for (int i = 0; i < nslots; i++) {
+        if (ty >= ys[i] && ty < ys[i] + BT_BTN_H) { down.k = slots[i]; down.y = ys[i]; break; }
+      }
       if (down.k) {
         down.valid = true;
         drawBTButton(down.k, down.y, true);
@@ -608,6 +785,7 @@ void ui_onTouchUp() {
     if ((ViewId)k.tab != curView) {
       t9Commit();
       curView = (ViewId)k.tab;
+      btScreen = BTS_INFO;   // entering the BT tab always lands on the info screen
       drawView();
     }
     return;
@@ -626,10 +804,266 @@ void ui_onTouchUp() {
     case ACT_EXIT_MARAUDER:
       switchToApp(ESP_PARTITION_SUBTYPE_APP_OTA_0, "Marauder");
       break;
+    case ACT_BT_SETTINGS: btScreen = BTS_SETTINGS; drawBTSettings(); break;
+    case ACT_BT_BACK:     btScreen = BTS_INFO;     drawBTView();     break;
+    case ACT_BRIGHT_UP:   adjustBrightness(+10);   drawBTSettings(); break;  // readout reflects new %
+    case ACT_BRIGHT_DN:   adjustBrightness(-10);   drawBTSettings(); break;
+
+    case ACT_OPEN_THEMES: btScreen = BTS_THEMES;   drawBTThemes();   break;
+    case ACT_THEMES_BACK: btScreen = BTS_SETTINGS; drawBTSettings(); break;
+    // Pick a theme: apply + persist, then repaint the whole UI in it (stays on
+    // the picker so you preview the new look immediately).
+    case ACT_SET_LIGHT:  theme = TB_LIGHT;  applyTheme(); savePrefs(); drawView(); break;
+    case ACT_SET_DARK:   theme = TB_DARK;   applyTheme(); savePrefs(); drawView(); break;
+    case ACT_SET_HACKER: theme = TB_HACKER; applyTheme(); savePrefs(); drawView(); break;
+    case ACT_SET_PRIDE:  theme = TB_PRIDE;  applyTheme(); savePrefs(); drawView(); break;
   }
 }
 
+// ---------------- Hacker "digital rain" behind the keyboard ----------------
+// Same idea as Marauder's see-through menu: Hacker keys are black + green
+// outline, so rain falls behind them. Rain SKIPS each key's label box (built
+// below) so text never flickers, and re-stamps the green outlines each frame.
+static int      tbdrop[64];
+static uint32_t tbrain_tick = 0;
+static int hkNBox = 0, hkBx0[96], hkBy0[96], hkBx1[96], hkBy1[96];   // protected label boxes
+static int hkNKey = 0, hkKx[96], hkKy[96], hkKw[96], hkKh[96];       // key rects (for outline re-stamp)
+
+static void hkAddBox(int x0, int y0, int x1, int y1) {
+  if (hkNBox < 96) { hkBx0[hkNBox]=x0; hkBy0[hkNBox]=y0; hkBx1[hkNBox]=x1; hkBy1[hkNBox]=y1; hkNBox++; }
+}
+static void hkAddKey(int x, int y, int w, int h) {
+  if (hkNKey < 96) { hkKx[hkNKey]=x; hkKy[hkNKey]=y; hkKw[hkNKey]=w; hkKh[hkNKey]=h; hkNKey++; }
+}
+static bool hkBlocked(int px, int py, int cw, int ch) {
+  for (int b = 0; b < hkNBox; b++)
+    if (px < hkBx1[b] && px + cw > hkBx0[b] && py < hkBy1[b] && py + ch > hkBy0[b]) return true;
+  return false;
+}
+
+static void tbHackerRain(uint32_t now) {
+  if (theme != TB_HACKER) return;
+  bool land = (curView == VIEW_QWERTY);
+  bool keyview = (curView == VIEW_KB || curView == VIEW_NUM || curView == VIEW_NAV || land);
+  if (!keyview) return;
+  static int tb_last_view = -1;
+  if ((int)curView != tb_last_view) {   // re-seed the columns when the view changes
+    tb_last_view = curView;
+    for (int c = 0; c < 64; c++) tbdrop[c] = -(int)random(0, 30);
+  }
+  if (now - tbrain_tick < 60) return;   // ~16 fps
+  tbrain_tick = now;
+
+  int W = land ? LAND_W : SCREEN_W;
+  int H = land ? LAND_H : SCREEN_H;
+  int top = land ? 0 : AREA_Y;          // portrait: below tabs+strip; QWERTY: full landscape
+  const int CW = 8, CH = 10, TRAIL = 6;
+  int ncols = W / CW; if (ncols > 64) ncols = 64;
+  int nrows = (H - top) / CH;
+
+  // Collect key rects + protected label boxes for the active view.
+  hkNBox = 0; hkNKey = 0;
+  if (curView == VIEW_KB) {
+    for (int i = 0; i < 15; i++) {
+      int x, y, w, h; t9CellRect(i, x, y, w, h);
+      hkAddKey(x, y, w, h);
+      int cx = x + w / 2;
+      hkAddBox(cx - 24, y + 10, cx + 24, y + h - 10);   // covers big char + small-letter row
+    }
+  } else if (land) {
+    for (int r = 0; r < QW_ROWS; r++)
+      for (int c = 0; c < QROW_N[r]; c++) {
+        int x, y, w, h; qKeyRect(r, c, x, y, w, h);
+        hkAddKey(x, y, w, h);
+        int cx = x + w / 2, cy = y + h / 2;
+        int hw = (int)strlen(QROWS[r][c].cap) * 5 + 5; if (hw > w / 2 - 2) hw = w / 2 - 2;
+        hkAddBox(cx - hw, cy - 12, cx + hw, cy + 13);
+      }
+  } else {
+    const ViewDef* v = currentViewDef();
+    if (v)
+      for (int r = 0; r < v->count; r++)
+        for (int c = 0; c < v->rows[r].count; c++) {
+          int x, y, w, h;
+          if (!keyRect(v, r, c, x, y, w, h)) continue;
+          hkAddKey(x, y, w, h);
+          const char* lbl = v->rows[r].keys[c].label;
+          int len = (lbl[0] && lbl[0] < 0x08) ? 2 : (int)strlen(lbl);
+          int cx = x + w / 2, cy = y + h / 2;
+          int hw = len * 5 + 5; if (hw > w / 2 - 2) hw = w / 2 - 2;
+          hkAddBox(cx - hw, cy - 12, cx + hw, cy + 13);
+        }
+  }
+
+  static const char* SET = "0123456789ABCDEF#$%&*+<>=/";
+  int nch = strlen(SET);
+  tft.setFont(&fonts::Font0);
+  tft.setTextDatum(textdatum_t::top_left);
+  for (int c = 0; c < ncols; c++) {
+    int y = tbdrop[c], x = c * CW;
+    for (int k = 0; k < 2; k++) {                    // bright head, dim trail
+      int yy = y - k; if (yy < 0 || yy >= nrows) continue;
+      int py = top + yy * CH;
+      if (hkBlocked(x, py, CW, CH)) continue;
+      char buf[2] = { SET[random(0, nch)], 0 };
+      tft.setTextColor(k == 0 ? 0x07E0 : 0x0320, 0x0000);
+      tft.drawString(buf, x, py);
+    }
+    int yt = y - TRAIL;
+    if (yt >= 0 && yt < nrows) {
+      int py = top + yt * CH;
+      if (!hkBlocked(x, py, CW, CH)) tft.fillRect(x, py, CW, CH, 0x0000);
+    }
+    tbdrop[c]++;
+    if (tbdrop[c] - TRAIL > nrows) tbdrop[c] = -(int)random(0, 20);
+  }
+  // Re-stamp the green key outlines over the rain (labels are left alone).
+  for (int i = 0; i < hkNKey; i++)
+    tft.drawRoundRect(hkKx[i] + KEY_GAP, hkKy[i] + KEY_GAP, hkKw[i] - 2 * KEY_GAP, hkKh[i] - 2 * KEY_GAP, 6, 0x07E0);
+}
+
+// ---------------- idle screensaver ----------------
+// Mirrors Marauder: after ~25s of no touch, dim to 40% and play a themed
+// animation with big, random, word-wrapped headlines. Hacker = green rain +
+// green quotes (its 7 phrases + 7 technobabble). Pride = rainbow backdrop +
+// raining "men" + rainbow quotes (its 5 phrases only, no technobabble).
+// Light/Dark = plain black + white technobabble quotes. Touch to wake.
+static void runScreensaver() {
+  bool pride  = (theme == TB_PRIDE);
+  bool hacker = (theme == TB_HACKER);
+  tft.setRotation(0);                       // portrait for the screensaver
+  int W = tft.width(), H = tft.height();
+
+  uint8_t saved = brightnessPct;
+  tft.setBrightness(40 * 255 / 100);        // dim to 40%
+
+  if (pride) for (int y = 0; y < H; y++) tft.drawFastHLine(0, y, W, hsv565(300.0f * y / H, 0.9f, 0.45f));
+  else       tft.fillScreen(0x0000);
+
+  static const char* PRIDE_TXT[] = { "Slay Queen", "Yasss", "Love is Love", "Born this Way", "It's raining men" };
+  static const char* HACK_TXT[]  = { "Enter the Matrix", "Zero-Day Exploit", "I'm bypassing the firewall",
+                                     "Backlooping through the Mainframe", "Come on, baby, talk to me",
+                                     "Now, we wait", "Too Easy" };
+  static const char* COMMON_TXT[] = {
+    "Differential girdlespring: Connects the up-and-down parts to the analytical line.",
+    "Sperry bearings: Parts used to balance the machine against a specific type of fake magnetic pull.",
+    "Panendermic semi-boloid slots: Grooves cut into the base to help hold the fake gears.",
+    "Non-reversible tremie pipe: A specialized tube used to control the fake flow of liquid.",
+    "Lotus-o-delta type stator: A main power coil that helps stop electric feedback.",
+    "Capacitive diractance: A fake electronic force that works against regular power resistance.",
+    "Malleable logarithmic casing: The strong outer shell designed to hold the gears together." };
+  const char** BASE = pride ? PRIDE_TXT : (hacker ? HACK_TXT : nullptr);
+  int nbase = pride ? 5 : (hacker ? 7 : 0);
+  int ncommon = 7, NPHR = pride ? nbase : (nbase + ncommon);
+  int phrase = -1; uint32_t lastPhrase = 0; bool firstPhrase = true;
+  int bcy = H / 2, bandY0 = H / 2, bandY1 = H / 2, prevBandY0 = H / 2, prevBandY1 = H / 2;
+
+  const int CW = 8, CH = 10, TRAIL = 7, MW = 22, MSTEP = 9;
+  int ncols = (pride ? W / MW : W / CW); if (ncols > 64) ncols = 64;
+  int nrows = H / CH;
+  for (int c = 0; c < ncols; c++) ss_drop[c] = pride ? -(int)random(0, H) : -(int)random(0, nrows);
+  static const char* SET = "0123456789ABCDEF#$%&*+<>=/";
+  int nch = strlen(SET);
+
+  TouchPoint tp;
+  while (!touch_read(tp)) {                  // run until touched
+    if (pride) {
+      for (int c = 0; c < ncols; c++) {
+        int x = c * MW, y = ss_drop[c];
+        for (int yy = y; yy < y + 22 && yy < H; yy++)
+          if (yy >= 0 && (yy < bandY0 || yy >= bandY1)) tft.drawFastHLine(x, yy, MW, hsv565(300.0f * yy / H, 0.9f, 0.45f));
+        ss_drop[c] += MSTEP;
+        if (ss_drop[c] > H) ss_drop[c] = -(int)random(0, 80) - 20;
+        int ny = ss_drop[c];
+        if (ny >= -20 && ny < H && (ny + 22 <= bandY0 || ny >= bandY1)) {
+          int mcx = x + MW / 2;
+          tft.fillCircle(mcx, ny + 4, 3, 0xFFFF);
+          tft.drawFastVLine(mcx, ny + 7, 8, 0xFFFF);
+          tft.drawFastHLine(mcx - 5, ny + 9, 11, 0xFFFF);
+          tft.drawLine(mcx, ny + 15, mcx - 5, ny + 20, 0xFFFF);
+          tft.drawLine(mcx, ny + 15, mcx + 5, ny + 20, 0xFFFF);
+        }
+      }
+    } else if (hacker) {
+      tft.setFont(&fonts::Font0); tft.setTextSize(1); tft.setTextDatum(textdatum_t::top_left);
+      for (int c = 0; c < ncols; c++) {
+        int y = ss_drop[c], x = c * CW, hy = y * CH, dy = (y - 1) * CH, ty2 = (y - TRAIL) * CH;
+        bool hb = (hy + CH > bandY0 && hy < bandY1), db = (dy + CH > bandY0 && dy < bandY1), tb = (ty2 + CH > bandY0 && ty2 < bandY1);
+        char buf[2] = {0, 0};
+        if (y >= 0 && y < nrows && !hb) { buf[0] = SET[random(0, nch)]; tft.setTextColor(0x07E0, 0x0000); tft.drawString(buf, x, hy); }
+        if (y - 1 >= 0 && y - 1 < nrows && !db) { buf[0] = SET[random(0, nch)]; tft.setTextColor(0x0320, 0x0000); tft.drawString(buf, x, dy); }
+        if (y - TRAIL >= 0 && y - TRAIL < nrows && !tb) tft.fillRect(x, ty2, CW, CH, 0x0000);
+        ss_drop[c]++;
+        if (ss_drop[c] - TRAIL > nrows) ss_drop[c] = -(int)random(0, 20);
+      }
+    }
+
+    uint32_t now = millis();
+    if (firstPhrase || now - lastPhrase > 8000) {
+      firstPhrase = false; lastPhrase = now;
+      int np = 0; if (NPHR > 1) { do { np = random(0, NPHR); } while (np == phrase); }
+      phrase = np;
+      const char* s = (phrase < nbase) ? BASE[phrase] : COMMON_TXT[phrase - nbase];
+
+      char lineText[12][40]; int lineSize[12]; int nAll = 0;
+      auto wrapInto = [&](const char* str, int sz) {
+        int cw = 6 * sz, cap = (W - 8) / cw; if (cap < 1) cap = 1;
+        char work[224]; strncpy(work, str, sizeof(work) - 1); work[sizeof(work) - 1] = 0;
+        char cur[40]; cur[0] = 0; int curlen = 0;
+        for (char* tok = strtok(work, " "); tok && nAll < 12; tok = strtok(NULL, " ")) {
+          int tl = strlen(tok);
+          if (curlen == 0) { strncpy(cur, tok, 39); cur[39] = 0; curlen = tl; }
+          else if (curlen + 1 + tl <= cap) { strcat(cur, " "); strncat(cur, tok, 39 - curlen - 1); curlen += 1 + tl; }
+          else { strncpy(lineText[nAll], cur, 39); lineText[nAll][39] = 0; lineSize[nAll] = sz; nAll++; strncpy(cur, tok, 39); cur[39] = 0; curlen = tl; }
+        }
+        if (curlen > 0 && nAll < 12) { strncpy(lineText[nAll], cur, 39); lineText[nAll][39] = 0; lineSize[nAll] = sz; nAll++; }
+      };
+      const char* colon = strchr(s, ':');
+      if (colon) {
+        char term[80]; int tn = (int)(colon - s) + 1; if (tn > 79) tn = 79;
+        strncpy(term, s, tn); term[tn] = 0;
+        const char* def = colon + 1; while (*def == ' ') def++;
+        wrapInto(term, 3); wrapInto(def, 2);      // 24pt term / 18pt definition
+      } else wrapInto(s, 3);
+
+      tft.fillRect(0, prevBandY0, W, prevBandY1 - prevBandY0, 0x0000);   // black plate behind the headline
+      int totalH = 0; for (int i = 0; i < nAll; i++) totalH += 8 * lineSize[i] + 4;
+      int y0 = bcy - totalH / 2;
+      bandY0 = y0 - 2; bandY1 = y0 + totalH + 2; prevBandY0 = bandY0; prevBandY1 = bandY1;
+
+      tft.setFont(&fonts::Font0); tft.setTextDatum(textdatum_t::top_left);
+      int gi = 0, total = strlen(s), ly = y0;
+      for (int i = 0; i < nAll; i++) {
+        int sz = lineSize[i], cw = 6 * sz, lh = 8 * sz + 4, llen = strlen(lineText[i]);
+        int lx = (W - llen * cw) / 2; if (lx < 0) lx = 0;
+        tft.setTextSize(sz);
+        if (pride) {
+          for (int j = 0; j < llen; j++) {
+            char cbuf[2] = { lineText[i][j], 0 };
+            tft.setTextColor(hsv565((float)gi / (total > 1 ? total - 1 : 1) * 300.0f, 1.0f, 1.0f), 0x0000);
+            tft.drawString(cbuf, lx + j * cw, ly);
+            gi++;
+          }
+          gi++;
+        } else {
+          tft.setTextColor(hacker ? 0x07E0 : 0xFFFF, 0x0000);
+          tft.drawString(lineText[i], lx, ly);
+        }
+        ly += lh;
+      }
+    }
+    delay(50);
+  }
+
+  while (touch_read(tp)) delay(10);          // wait for release so the wake tap doesn't type
+  ss_last_activity = millis();
+  applyBrightness();                         // restore brightness
+  drawView();                                // repaint (also restores QWERTY rotation)
+}
+
 void ui_tick(uint32_t now) {
+  if (now - ss_last_activity > 25000) { runScreensaver(); return; }   // idle screensaver
+  tbHackerRain(now);   // live rain behind the Hacker keyboard (no-op in other themes/views)
   // T9: multi-tap window expired -> commit the candidate.
   // (Long-press-for-digit was removed: this panel holds "finger down" well
   // past the threshold after a physical lift, so it fired on normal taps and
@@ -647,11 +1081,15 @@ void ui_tick(uint32_t now) {
     lastConn = conn;
     lastBonds = bonds;
     if (curView != VIEW_QWERTY) drawStrip();   // strip is portrait-only
-    if (curView == VIEW_BT) drawBTView();
+    if (curView == VIEW_BT && btScreen == BTS_INFO) drawBTView();  // don't clobber settings/theme screens
   }
 }
 
 void ui_begin() {
+  loadPrefs();          // restore saved theme + brightness
+  applyTheme();
+  applyBrightness();
+  ss_last_activity = millis();   // start the screensaver idle timer fresh
   tft.fillScreen(COL_BG);
   drawView();
 }
