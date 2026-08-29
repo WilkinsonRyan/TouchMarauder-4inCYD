@@ -851,7 +851,7 @@ void MenuFunctions::main(uint32_t currentTime)
       {
         static bool home_armed = true;
         if (pressed && wifi_scan_obj.currentScanMode == WIFI_SCAN_OFF
-            && (int)t_x < 40 && (int)t_y < 22) {
+            && (int)t_x < 66 && (int)t_y < 36) {   // generous zone: down to just above row 1 (top ~39)
           if (home_armed) { home_armed = false; this->goHome(); }   // reboots; no return needed
         } else if (!pressed) {
           home_armed = true;
@@ -1473,11 +1473,11 @@ void MenuFunctions::batteryCYD(bool initial)
 void MenuFunctions::drawHomeButton()
 {
   TFT_eSPI& t = display_obj.tft;
-  int cx = 14, cy = STATUS_BAR_WIDTH / 2;
-  t.fillRect(0, 0, 30, STATUS_BAR_WIDTH, STATUSBAR_COLOR);         // clear the corner
-  t.fillTriangle(cx, cy - 6, cx - 7, cy + 1, cx + 7, cy + 1, TFT_WHITE);  // roof
-  t.fillRect(cx - 5, cy + 1, 10, 6, TFT_WHITE);                    // body
-  t.fillRect(cx - 2, cy + 3, 4, 4, STATUSBAR_COLOR);              // door cutout
+  t.fillRect(0, 0, 66, STATUS_BAR_WIDTH, STATUSBAR_COLOR);   // clear left corner (CH starts at x=68)
+  t.fillRoundRect(1, 0, 60, STATUS_BAR_WIDTH, 3, TFT_DARKGREY);
+  t.setTextDatum(TL_DATUM);
+  t.setTextColor(TFT_WHITE, TFT_DARKGREY);
+  t.drawString("Home", 10, 0, 2);
 }
 
 // Reboot into the TouchBoard app (ota_1) and ask it to open the Home launcher.
