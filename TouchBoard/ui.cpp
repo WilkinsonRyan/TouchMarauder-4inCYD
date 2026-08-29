@@ -789,9 +789,8 @@ static void homeTileRect(int i, int& x, int& y, int& w, int& h) {
 static void drawHomeTile(int i, bool pressed) {
   int x, y, w, h; homeTileRect(i, x, y, w, h);
   const HomeTile& t = HOME_TILES[i];
+  // Uniform tile colour across themes so all apps read the same (no Patriot striping here).
   uint16_t bg = !t.ready ? COL_KEY : (pressed ? COL_KEY_DOWN : COL_KEY_SPEC);
-  if (patriotOn() && t.ready && !pressed)
-    bg = patriotKeyColor(x + w / 2, y + h / 2, 0, AREA_Y, SCREEN_W, SCREEN_H - AREA_Y);
   tft.fillRoundRect(x, y, w, h, 8, bg);
   keyOutlineRect(x, y, w, h, 8);
   tft.setTextDatum(textdatum_t::middle_center);
@@ -999,6 +998,7 @@ static void booksScanLibrary() {
           if (bd && bd.isDirectory()) { File g;
             while ((g = bd.openNextFile())) {
               String fn = g.name(); int s2 = fn.lastIndexOf('/'); if (s2 >= 0) fn = fn.substring(s2 + 1);
+              if (fn.length() && fn[0] == '.') { g.close(); continue; }   // skip macOS ._ and .DS_Store
               String low = fn; low.toLowerCase();
               if (low.endsWith(".txt")) txt = bdir + "/" + fn;
               else if (low.endsWith(".jpg") || low.endsWith(".jpeg") || low.endsWith(".png") || low.endsWith(".bmp")) cov = bdir + "/" + fn;
@@ -1018,6 +1018,28 @@ static void libCellRect(int i, int& x, int& y, int& w, int& h) {
   x = c * cellW + 6; y = gridTop + r * cellH; w = cellW - 12; h = cellH - 10;
 }
 
+// Draw one book's title under its cover; long titles scroll (marquee, ping-pong),
+// clipped to the cell so they don't bleed into neighbours.
+static int bkPhase = 0;
+static void booksDrawTitle(int i) {
+  int x, y, w, h; libCellRect(i, x, y, w, h);
+  int coverH = h - 34, ty = y + coverH + 6, th = 18;
+  tft.setFont(&fonts::FreeSans9pt7b);
+  tft.setClipRect(x, ty, w, th);
+  tft.fillRect(x, ty, w, th, COL_BG);
+  tft.setTextColor(COL_TEXT, COL_BG);
+  int tw = tft.textWidth(libTitle[i]);
+  if (tw <= w) { tft.setTextDatum(textdatum_t::top_center); tft.drawString(libTitle[i], x + w / 2, ty); }
+  else {
+    int span = tw - w + 12;
+    int p = bkPhase % (span * 2);
+    int off = (p <= span) ? p : (span * 2 - p);      // ping-pong scroll
+    tft.setTextDatum(textdatum_t::top_left);
+    tft.drawString(libTitle[i], x - off, ty);
+  }
+  tft.clearClipRect();
+}
+
 static void booksDrawLibrary() {
   booksMode = BM_LIBRARY; curView = VIEW_KB; tft.setRotation(0);
   tft.fillScreen(COL_BG); booksHeader(curAuthor); drawStrip();
@@ -1028,10 +1050,7 @@ static void booksDrawLibrary() {
     int x, y, w, h; libCellRect(i, x, y, w, h);
     int coverH = h - 34;
     drawCover(libCover[i], x, y, w, coverH);
-    String t = libTitle[i]; tft.setFont(&fonts::FreeSans9pt7b); tft.setTextDatum(textdatum_t::top_center);
-    tft.setTextColor(COL_TEXT, COL_BG);
-    if (t.length() > 18) t = t.substring(0, 17) + "…";
-    tft.drawString(t, x + w / 2, y + coverH + 4);
+    booksDrawTitle(i);                                  // title (scrolls if long)
   }
   // bottom bar: back to Authors
   int by = SCREEN_H - BOOK_BAR_H;
@@ -1085,6 +1104,20 @@ static void booksTouchUp() {
     return;
   }
   if (bkDownY >= AREA_Y) { if (bkDownX > SCREEN_W / 2) booksNext(); else booksPrev(); }
+}
+
+// Advance the library title marquees (~11 fps); only redraws long titles.
+static void booksMarqueeTick(uint32_t now) {
+  static uint32_t last = 0;
+  if (now - last < 90) return; last = now;
+  bkPhase += 2;
+  tft.setFont(&fonts::FreeSans9pt7b);
+  int gridTop = AREA_Y + 6, cellH = 190;
+  int maxRows = (SCREEN_H - BOOK_BAR_H - gridTop) / cellH, maxCells = maxRows * LIB_COLS;
+  for (int i = 0; i < libCount && i < maxCells; i++) {
+    int x, y, w, h; libCellRect(i, x, y, w, h);
+    if (tft.textWidth(libTitle[i]) > w) booksDrawTitle(i);
+  }
 }
 
 static void drawView() {
@@ -1475,6 +1508,7 @@ static void runScreensaver() {
 
 void ui_tick(uint32_t now) {
   if (now - ss_last_activity > 25000) { runScreensaver(); return; }   // idle screensaver
+  if (booksMode == BM_LIBRARY) { booksMarqueeTick(now); return; }     // scroll long book titles
   tbHackerRain(now);   // live rain behind the Hacker keyboard (no-op in other themes/views)
   // T9: multi-tap window expired -> commit the candidate.
   // (Long-press-for-digit was removed: this panel holds "finger down" well
