@@ -27,6 +27,7 @@ enum : uint8_t {
   ACT_SET_LIGHT,     // theme picker: pick Light
   ACT_SET_DARK,      // theme picker: pick Dark
   ACT_SET_HACKER,    // theme picker: pick Hacker
+  ACT_SET_USA,       // theme picker: pick USA Patriot
 };
 
 // Single-byte label codes the renderer draws as shapes instead of text

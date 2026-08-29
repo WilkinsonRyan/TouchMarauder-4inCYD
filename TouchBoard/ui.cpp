@@ -49,20 +49,36 @@ static uint16_t COL_BG, COL_KEY, COL_KEY_SPEC, COL_KEY_DOWN, COL_TEXT,
                 COL_TAB, COL_TAB_ON, COL_OK, COL_ADV, COL_DIM;
 
 // ---------------- theme + display prefs (NVS ns "tbdisp") ----------------
-enum { TB_LIGHT = 0, TB_DARK = 1, TB_HACKER = 2 };
+enum { TB_LIGHT = 0, TB_DARK = 1, TB_HACKER = 2, TB_PATRIOT = 3 };
 static uint8_t theme         = TB_DARK;   // default: the original dark skin
 static uint8_t brightnessPct = 80;        // 10..100
 
-// Outline colour for clear key separation in Dark (white) / Hacker (neon-green).
-// Light already separates via fill contrast, so it gets none.
+// Patriot palette (RGB565): flag red, white, navy/blue.
+static const uint16_t USA_RED  = 0xB926;  // flag red (#B22234)
+static const uint16_t USA_BLUE = 0x0011;  // flag navy (#3C3B6E, darkened)
+static const uint16_t USA_KEYB = 0x1A3F;  // brighter blue for key fills (reads white text)
+
+static inline bool patriotOn() { return theme == TB_PATRIOT; }
+
+// Patriot key fill: horizontal red/blue "stripes" across the key area so the
+// keyboard reads like a flag; white text + white outline stay legible on both.
+static uint16_t patriotKeyColor(int cx, int cy, int x0, int y0, int W, int H) {
+  int band = (H > 0) ? ((cy - y0) * 6 / H) : 0;   // 6 stripes top->bottom
+  if (band < 0) band = 0; if (band > 5) band = 5;
+  return (band & 1) ? USA_KEYB : USA_RED;
+}
+
+// Outline colour for clear key separation in Dark (white) / Hacker (neon-green)
+// / Patriot (white). Light already separates via fill contrast, so it gets none.
 static void keyOutlineRect(int x, int y, int w, int h, int r) {
-  if      (theme == TB_DARK)   tft.drawRoundRect(x, y, w, h, r, 0xFFFF);
-  else if (theme == TB_HACKER) tft.drawRoundRect(x, y, w, h, r, 0x07E0);
+  if      (theme == TB_DARK)    tft.drawRoundRect(x, y, w, h, r, 0xFFFF);
+  else if (theme == TB_HACKER)  tft.drawRoundRect(x, y, w, h, r, 0x07E0);
+  else if (theme == TB_PATRIOT) tft.drawRoundRect(x, y, w, h, r, 0xFFFF);
 }
 
 static const char* themeName(uint8_t t) {
   switch (t) { case TB_LIGHT: return "Light"; case TB_HACKER: return "Hacker";
-               default: return "Dark"; }
+               case TB_PATRIOT: return "USA"; default: return "Dark"; }
 }
 
 static void applyTheme() {
@@ -75,6 +91,10 @@ static void applyTheme() {
       COL_BG=0x0000; COL_KEY=0x0000; COL_KEY_SPEC=0x0000; COL_KEY_DOWN=0x03E0;
       COL_TEXT=0x07E0; COL_TAB=0x1082; COL_TAB_ON=0x07E0; COL_OK=0x07E0;
       COL_ADV=0x07FF; COL_DIM=0x0560; break;
+    case TB_PATRIOT: // navy bg, red/blue striped keys (below), white text + outlines
+      COL_BG=USA_BLUE; COL_KEY=USA_RED; COL_KEY_SPEC=USA_KEYB; COL_KEY_DOWN=0xF800;
+      COL_TEXT=0xFFFF; COL_TAB=USA_BLUE; COL_TAB_ON=USA_RED; COL_OK=0x07E0;
+      COL_ADV=0xFFFF; COL_DIM=0xC618; break;
     default:         // TB_DARK (original)
       COL_BG=0x10A2; COL_KEY=0x39E7; COL_KEY_SPEC=0x29A6; COL_KEY_DOWN=0x04F3;
       COL_TEXT=0xFFFF; COL_TAB=0x2104; COL_TAB_ON=0x04F3; COL_OK=0x07E8;
@@ -97,7 +117,7 @@ static void loadPrefs() {
   Preferences p; p.begin("tbdisp", true);
   uint8_t def = p.getBool("dark", true) ? TB_DARK : TB_LIGHT;   // migrate old bool
   theme = p.getUChar("theme", def);
-  if (theme > TB_HACKER) theme = TB_DARK;   // clamp any stale value (e.g. the removed Pride)
+  if (theme > TB_PATRIOT) theme = TB_DARK;   // clamp any stale/removed value
   brightnessPct = p.getUChar("bright", 80);
   p.end();
   if (brightnessPct < 10) brightnessPct = 10;    // guard against a bad stored value
@@ -165,18 +185,19 @@ static const KeyDef ST_BTN_BACK  = { "Back",         0, 0, ACT_BT_BACK,     1 };
 static const KeyDef TH_BTN_LIGHT  = { "Light Theme",  0, 0, ACT_SET_LIGHT,   1 };
 static const KeyDef TH_BTN_DARK   = { "Dark Theme",   0, 0, ACT_SET_DARK,    1 };
 static const KeyDef TH_BTN_HACKER = { "Hacker Theme", 0, 0, ACT_SET_HACKER,  1 };
+static const KeyDef TH_BTN_USA    = { "USA Patriot",  0, 0, ACT_SET_USA,     1 };
 static const KeyDef TH_BTN_BACK   = { "Back",         0, 0, ACT_THEMES_BACK, 1 };
 
 static const int BT_BTN_X = 12, BT_BTN_W = SCREEN_W - 24, BT_BTN_H = 40;
 // Four slots stacked up from the bottom (pitch 46) for info/settings screens.
 static const int BT_BTN_Y[4] = { SCREEN_H - 196, SCREEN_H - 150, SCREEN_H - 104, SCREEN_H - 58 };
-// Four slots down from the top for the theme picker.
-static const int TH_BTN_Y[4] = { AREA_Y + 40, AREA_Y + 92, AREA_Y + 144, AREA_Y + 196 };
+// Five slots down from the top for the theme picker.
+static const int TH_BTN_Y[5] = { AREA_Y + 40, AREA_Y + 92, AREA_Y + 144, AREA_Y + 196, AREA_Y + 248 };
 
 // Which button occupies each slot, per screen.
 static const KeyDef* const BT_INFO_BTNS[4] = { &BT_BTN_ADV, &BT_BTN_CLEAR, &BT_BTN_SETTINGS, &BT_BTN_EXIT };
 static const KeyDef* const BT_SET_BTNS[4]  = { &ST_BTN_BR_UP, &ST_BTN_BR_DN, &ST_BTN_THEME, &ST_BTN_BACK };
-static const KeyDef* const TH_BTNS[4]      = { &TH_BTN_LIGHT, &TH_BTN_DARK, &TH_BTN_HACKER, &TH_BTN_BACK };
+static const KeyDef* const TH_BTNS[5]      = { &TH_BTN_LIGHT, &TH_BTN_DARK, &TH_BTN_HACKER, &TH_BTN_USA, &TH_BTN_BACK };
 
 // BT tab has three sub-screens.
 enum { BTS_INFO = 0, BTS_SETTINGS, BTS_THEMES };
@@ -297,6 +318,7 @@ static void drawT9Key(int idx, bool pressed) {
   t9CellRect(idx, x, y, w, h);
   bool spec = (idx >= 12 || idx == T9_CASE_KEY);
   uint16_t bg = pressed ? COL_KEY_DOWN : (spec ? COL_KEY_SPEC : COL_KEY);
+  if (patriotOn() && !pressed) bg = patriotKeyColor(x + w / 2, y + h / 2, 0, AREA_Y, SCREEN_W, AREA_H);
   tft.fillRoundRect(x + KEY_GAP, y + KEY_GAP, w - 2 * KEY_GAP, h - 2 * KEY_GAP, 6, bg);
   keyOutlineRect(x + KEY_GAP, y + KEY_GAP, w - 2 * KEY_GAP, h - 2 * KEY_GAP, 6);
 
@@ -430,6 +452,7 @@ static void drawTabs() {
 static void drawKey(const KeyDef* k, int x, int y, int w, int h, bool pressed) {
   uint16_t bg = pressed ? COL_KEY_DOWN
               : (k->action != ACT_NONE ? COL_KEY_SPEC : COL_KEY);
+  if (patriotOn() && !pressed) bg = patriotKeyColor(x + w / 2, y + h / 2, 0, AREA_Y, SCREEN_W, AREA_H);
   tft.fillRoundRect(x + KEY_GAP, y + KEY_GAP, w - 2 * KEY_GAP, h - 2 * KEY_GAP, 6, bg);
   keyOutlineRect(x + KEY_GAP, y + KEY_GAP, w - 2 * KEY_GAP, h - 2 * KEY_GAP, 6);
 
@@ -499,6 +522,7 @@ static void switchToApp(esp_partition_subtype_t sub, const char* name) {
 // ---------------- BT info screen ----------------
 static void drawBTButton(const KeyDef* k, int y, bool pressed) {
   uint16_t bg = pressed ? COL_KEY_DOWN : COL_KEY_SPEC;
+  if (patriotOn() && !pressed) bg = patriotKeyColor(BT_BTN_X + BT_BTN_W / 2, y + BT_BTN_H / 2, BT_BTN_X, AREA_Y, BT_BTN_W, AREA_H);
   tft.fillRoundRect(BT_BTN_X, y, BT_BTN_W, BT_BTN_H, 8, bg);
   keyOutlineRect(BT_BTN_X, y, BT_BTN_W, BT_BTN_H, 8);
   tft.setTextDatum(textdatum_t::middle_center);
@@ -561,7 +585,7 @@ static void drawBTThemes() {
   tft.drawString("Theme", 12, AREA_Y + 8);
 
   // Buttons render in the *active* theme's style (so tapping one previews it live).
-  for (int i = 0; i < 4; i++) drawBTButton(TH_BTNS[i], TH_BTN_Y[i], false);
+  for (int i = 0; i < 5; i++) drawBTButton(TH_BTNS[i], TH_BTN_Y[i], false);
 }
 
 // ---------------- QWERTY (landscape) ----------------
@@ -613,6 +637,7 @@ static void drawQKey(int r, int c, bool pressed) {
   int x, y, w, h; qKeyRect(r, c, x, y, w, h);
   bool spec = (k.type != QK_CHAR);
   uint16_t bg = pressed ? COL_KEY_DOWN : (spec ? COL_KEY_SPEC : COL_KEY);
+  if (patriotOn() && !pressed) bg = patriotKeyColor(x + w / 2, y + h / 2, 0, 0, LAND_W, LAND_H);
   if (k.type == QK_SHIFT && qwCase != CASE_LOWER && !pressed) bg = COL_TAB_ON;  // lit: shift or caps
   tft.fillRoundRect(x + KEY_GAP, y + KEY_GAP, w - 2 * KEY_GAP, h - 2 * KEY_GAP, 6, bg);
   keyOutlineRect(x + KEY_GAP, y + KEY_GAP, w - 2 * KEY_GAP, h - 2 * KEY_GAP, 6);
@@ -742,7 +767,7 @@ void ui_onTouchDown(int tx, int ty) {
   if (curView == VIEW_BT) {
     if (tx >= BT_BTN_X && tx < BT_BTN_X + BT_BTN_W) {
       const KeyDef* const* slots;  const int* ys;  int nslots;
-      if (btScreen == BTS_THEMES)        { slots = TH_BTNS;      ys = TH_BTN_Y; nslots = 4; }
+      if (btScreen == BTS_THEMES)        { slots = TH_BTNS;      ys = TH_BTN_Y; nslots = 5; }
       else if (btScreen == BTS_SETTINGS) { slots = BT_SET_BTNS;  ys = BT_BTN_Y; nslots = 4; }
       else                               { slots = BT_INFO_BTNS; ys = BT_BTN_Y; nslots = 4; }
       for (int i = 0; i < nslots; i++) {
@@ -816,6 +841,7 @@ void ui_onTouchUp() {
     case ACT_SET_LIGHT:  theme = TB_LIGHT;  applyTheme(); savePrefs(); drawView(); break;
     case ACT_SET_DARK:   theme = TB_DARK;   applyTheme(); savePrefs(); drawView(); break;
     case ACT_SET_HACKER: theme = TB_HACKER; applyTheme(); savePrefs(); drawView(); break;
+    case ACT_SET_USA:    theme = TB_PATRIOT; applyTheme(); savePrefs(); drawView(); break;
   }
 }
 
@@ -924,21 +950,28 @@ static void tbHackerRain(uint32_t now) {
 // ---------------- idle screensaver ----------------
 // Mirrors Marauder: after ~25s of no touch, dim to 40% and play a themed
 // animation with big, random, word-wrapped headlines. Hacker = green rain +
-// green quotes (its 7 phrases + 7 technobabble). Light/Dark = plain black +
-// white technobabble quotes. Touch to wake.
+// green quotes (its 7 phrases + 7 technobabble). USA Patriot = navy backdrop,
+// red/white/blue star rain + patriotic phrases in R/W/B. Light/Dark = plain
+// black + white technobabble quotes. Touch to wake.
 static void runScreensaver() {
-  bool hacker = (theme == TB_HACKER);
+  bool hacker  = (theme == TB_HACKER);
+  bool patriot = (theme == TB_PATRIOT);
   tft.setRotation(0);                       // portrait for the screensaver
   int W = tft.width(), H = tft.height();
+  uint16_t bg0 = patriot ? USA_BLUE : 0x0000;   // screensaver background (navy for Patriot)
 
   uint8_t saved = brightnessPct;
   tft.setBrightness(40 * 255 / 100);        // dim to 40%
 
-  tft.fillScreen(0x0000);
+  tft.fillScreen(bg0);
 
   static const char* HACK_TXT[]  = { "Enter the Matrix", "Zero-Day Exploit", "I'm bypassing the firewall",
                                      "Backlooping through the Mainframe", "Come on, baby, talk to me",
                                      "Now, we wait", "Too Easy" };
+  static const char* USA_TXT[]   = { "USA! USA! USA!", "Land of the Free", "Home of the Brave",
+                                     "1776", "We the People", "Don't Tread on Me",
+                                     "Life, Liberty, Happiness", "E Pluribus Unum",
+                                     "Give me Liberty", "Stars and Stripes Forever" };
   static const char* COMMON_TXT[] = {
     "Differential girdlespring: Connects the up-and-down parts to the analytical line.",
     "Sperry bearings: Parts used to balance the machine against a specific type of fake magnetic pull.",
@@ -947,9 +980,10 @@ static void runScreensaver() {
     "Lotus-o-delta type stator: A main power coil that helps stop electric feedback.",
     "Capacitive diractance: A fake electronic force that works against regular power resistance.",
     "Malleable logarithmic casing: The strong outer shell designed to hold the gears together." };
-  const char** BASE = hacker ? HACK_TXT : nullptr;
-  int nbase = hacker ? 7 : 0;
-  int ncommon = 7, NPHR = nbase + ncommon;
+  const char** BASE = hacker ? HACK_TXT : (patriot ? USA_TXT : nullptr);
+  int nbase = hacker ? 7 : (patriot ? 10 : 0);
+  // Patriot shows only its own phrases (no technobabble); others append COMMON.
+  int ncommon = 7, NPHR = patriot ? nbase : (nbase + ncommon);
   int phrase = -1; uint32_t lastPhrase = 0; bool firstPhrase = true;
   int bcy = H / 2, bandY0 = H / 2, bandY1 = H / 2, prevBandY0 = H / 2, prevBandY1 = H / 2;
 
@@ -971,6 +1005,18 @@ static void runScreensaver() {
         if (y >= 0 && y < nrows && !hb) { buf[0] = SET[random(0, nch)]; tft.setTextColor(0x07E0, 0x0000); tft.drawString(buf, x, hy); }
         if (y - 1 >= 0 && y - 1 < nrows && !db) { buf[0] = SET[random(0, nch)]; tft.setTextColor(0x0320, 0x0000); tft.drawString(buf, x, dy); }
         if (y - TRAIL >= 0 && y - TRAIL < nrows && !tb) tft.fillRect(x, ty2, CW, CH, 0x0000);
+        ss_drop[c]++;
+        if (ss_drop[c] - TRAIL > nrows) ss_drop[c] = -(int)random(0, 20);
+      }
+    } else if (patriot) {
+      // Star rain: '*' glyphs falling in cycling red / white / blue over navy.
+      static const uint16_t PC[3] = { 0xFFFF, USA_RED, USA_KEYB };
+      tft.setFont(&fonts::Font0); tft.setTextSize(1); tft.setTextDatum(textdatum_t::top_left);
+      for (int c = 0; c < ncols; c++) {
+        int y = ss_drop[c], x = c * CW, hy = y * CH, ty2 = (y - TRAIL) * CH;
+        bool hb = (hy + CH > bandY0 && hy < bandY1), tb = (ty2 + CH > bandY0 && ty2 < bandY1);
+        if (y >= 0 && y < nrows && !hb) { tft.setTextColor(PC[c % 3], bg0); tft.drawString("*", x, hy); }
+        if (y - TRAIL >= 0 && y - TRAIL < nrows && !tb) tft.fillRect(x, ty2, CW, CH, bg0);
         ss_drop[c]++;
         if (ss_drop[c] - TRAIL > nrows) ss_drop[c] = -(int)random(0, 20);
       }
@@ -1004,18 +1050,20 @@ static void runScreensaver() {
         wrapInto(term, 3); wrapInto(def, 2);      // 24pt term / 18pt definition
       } else wrapInto(s, 3);
 
-      tft.fillRect(0, prevBandY0, W, prevBandY1 - prevBandY0, 0x0000);   // black plate behind the headline
+      tft.fillRect(0, prevBandY0, W, prevBandY1 - prevBandY0, bg0);   // plate behind the headline
       int totalH = 0; for (int i = 0; i < nAll; i++) totalH += 8 * lineSize[i] + 4;
       int y0 = bcy - totalH / 2;
       bandY0 = y0 - 2; bandY1 = y0 + totalH + 2; prevBandY0 = bandY0; prevBandY1 = bandY1;
 
+      static const uint16_t USA_LINE[3] = { 0xFFFF, USA_RED, USA_KEYB };  // Patriot: cycle white/red/blue per line
       tft.setFont(&fonts::Font0); tft.setTextDatum(textdatum_t::top_left);
       int ly = y0;
       for (int i = 0; i < nAll; i++) {
         int sz = lineSize[i], cw = 6 * sz, lh = 8 * sz + 4, llen = strlen(lineText[i]);
         int lx = (W - llen * cw) / 2; if (lx < 0) lx = 0;
         tft.setTextSize(sz);
-        tft.setTextColor(hacker ? 0x07E0 : 0xFFFF, 0x0000);
+        uint16_t fg = patriot ? USA_LINE[i % 3] : (hacker ? 0x07E0 : 0xFFFF);
+        tft.setTextColor(fg, bg0);
         tft.drawString(lineText[i], lx, ly);
         ly += lh;
       }

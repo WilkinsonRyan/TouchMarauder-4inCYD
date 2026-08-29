@@ -198,9 +198,11 @@ On top of hord-brayden's keyboard, this build adds a shared interface layer
 
 - **Theme picker** — BT tab → Settings → **Toggle Theme**: Light / Dark /
   **Hacker** (black + neon-green, outlined keys, live Matrix rain behind the
-  keyboard). Persisted to NVS (namespace `tbdisp`, separate from Marauder's).
+  keyboard) / **USA Patriot** (navy background, red/blue flag-striped keys,
+  white text). Persisted to NVS (namespace `tbdisp`, separate from Marauder's).
 - **Brightness +/−** and a live **Theme** readout on the Settings screen.
 - **Idle screensaver** — after ~25s untouched, dims to 40% and plays the themed
-  animation (Matrix rain) with cycling word-wrapped quotes; tap to wake.
+  animation (Matrix rain, or a red/white/blue star rain in USA Patriot) with
+  cycling word-wrapped quotes; tap to wake.
 - **Orientation** flipped 180° so it matches the Marauder half on this board.
 

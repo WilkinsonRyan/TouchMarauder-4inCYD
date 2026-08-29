@@ -8,8 +8,8 @@
 
   // 4" CYD runtime display state (defined in esp32_marauder.ino). Uses
   // unsigned char (not uint8_t) because configs.h is included before <Arduino.h>.
-  extern bool dark_mode;             // derived: true for any dark-bg theme (Dark/Hacker), false = Light
-  enum { THEME_DARK = 0, THEME_LIGHT = 1, THEME_HACKER = 2 };
+  extern bool dark_mode;             // derived: true for any dark-bg theme (Dark/Hacker/Patriot), false = Light
+  enum { THEME_DARK = 0, THEME_LIGHT = 1, THEME_HACKER = 2, THEME_PATRIOT = 3 };
   extern unsigned char ui_theme;     // active theme (THEME_*); dark_mode is derived from it
   extern unsigned char backlight_pct;// backlight brightness 10..100 %
   void applyBrightness();            // push backlight_pct to the PWM backlight

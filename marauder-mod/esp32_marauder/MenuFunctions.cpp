@@ -2864,6 +2864,7 @@ void MenuFunctions::RunSetup()
   this->addNodes(&themeMenu, "Light Theme",  TFTWHITE,   NULL, 0, [this]() { this->setTheme(THEME_LIGHT);  });
   this->addNodes(&themeMenu, "Dark Theme",   TFTCYAN,    NULL, 0, [this]() { this->setTheme(THEME_DARK);   });
   this->addNodes(&themeMenu, "Hacker Theme", TFTGREEN,   NULL, 0, [this]() { this->setTheme(THEME_HACKER); });
+  this->addNodes(&themeMenu, "USA Patriot",  TFTRED,     NULL, 0, [this]() { this->setTheme(THEME_PATRIOT); });
 
   // Specific setting menu
   specSettingMenu.parentMenu = &settingsMenu;
@@ -3254,6 +3255,15 @@ uint16_t MenuFunctions::itemColor(Menu* menu, int absIndex) {
     return HACKER_PAL[rank % (int)(sizeof(HACKER_PAL) / sizeof(HACKER_PAL[0]))];
   }
 
+  if (ui_theme == THEME_PATRIOT) {
+    if (isBack) return TFT_LIGHTGREY;                 // Back stays neutral, easy to find
+    static const uint16_t USA_PAL[] = { TFT_RED, TFT_WHITE, 0x24BF };  // red / white / bright blue
+    int rank = 0;
+    for (int i = 0; i < absIndex; i++)
+      if (menu->list->get(i).name != text09) rank++;
+    return USA_PAL[rank % 3];
+  }
+
   return getColor(item.color);   // Dark / Light: existing behaviour
 }
 
@@ -3278,6 +3288,34 @@ void MenuFunctions::setTheme(uint8_t t) {
 void MenuFunctions::drawThemeGlyph(int x, int y, int rank, uint16_t color) {
   TFT_eSPI& t = display_obj.tft;
   int cx = x + ICON_W / 2, cy = y + ICON_H / 2;
+
+  if (ui_theme == THEME_PATRIOT) {
+    const uint16_t RED = TFT_RED, WHT = TFT_WHITE, BLU = 0x001F;
+    switch (rank % 3) {
+      case 0: {  // star sparkle in the row's cycling colour
+        t.drawLine(cx, cy - 9, cx, cy + 9, color);
+        t.drawLine(cx - 9, cy, cx + 9, cy, color);
+        t.drawLine(cx - 6, cy - 6, cx + 6, cy + 6, color);
+        t.drawLine(cx - 6, cy + 6, cx + 6, cy - 6, color);
+        t.fillCircle(cx, cy, 2, color);
+        break;
+      }
+      case 1: {  // little flag: red/white stripes + blue canton
+        int sh = ICON_H / 6;
+        for (int s = 0; s < 6; s++) t.fillRect(x + 2, y + s * sh, ICON_W - 4, sh, (s & 1) ? WHT : RED);
+        t.fillRect(x + 2, y, (ICON_W - 4) / 2, sh * 3, BLU);
+        t.fillCircle(x + 2 + (ICON_W - 4) / 4, y + sh + 1, 1, WHT);
+        break;
+      }
+      default: { // shield with a white star
+        t.fillRoundRect(cx - 7, cy - 8, 14, 9, 2, BLU);
+        t.fillTriangle(cx - 7, cy + 1, cx + 7, cy + 1, cx, cy + 9, RED);
+        t.fillCircle(cx, cy - 3, 2, WHT);
+        break;
+      }
+    }
+    return;
+  }
 
   // Hacker glyphs: single-colour line art (the row's hacker colour) on black.
   switch (rank % 6) {
@@ -3325,7 +3363,7 @@ void MenuFunctions::drawItemIcon(Menu* menu, int absIndex, int iconY, uint16_t c
   if (!menu || !menu->list || absIndex < 0 || absIndex >= menu->list->size()) return;
   MenuNode item = menu->list->get(absIndex);
   if (item.name == text09) return;
-  if (ui_theme == THEME_HACKER) {
+  if (ui_theme == THEME_HACKER || ui_theme == THEME_PATRIOT) {
     int rank = 0;
     for (int i = 0; i < absIndex; i++)
       if (menu->list->get(i).name != text09) rank++;
@@ -3478,9 +3516,11 @@ void MenuFunctions::runScreensaver() {
   backlight_pct = 40;                 // dim while the screensaver runs
   applyBrightness();
 
-  t.fillScreen(TFT_BLACK);
+  bool hacker  = (ui_theme == THEME_HACKER);
+  bool patriot = (ui_theme == THEME_PATRIOT);
+  uint16_t bg0 = patriot ? 0x0011 : TFT_BLACK;   // navy backdrop for Patriot
 
-  bool hacker = (ui_theme == THEME_HACKER);
+  t.fillScreen(bg0);
 
   // Cycling headline (protected band in the vertical centre, redrawn only on
   // change so the animation never flickers it). Theme-specific phrases first,
@@ -3488,6 +3528,10 @@ void MenuFunctions::runScreensaver() {
   static const char* HACK_TXT[]  = { "Enter the Matrix", "Zero-Day Exploit", "I'm bypassing the firewall",
                                      "Backlooping through the Mainframe", "Come on, baby, talk to me",
                                      "Now, we wait", "Too Easy" };
+  static const char* USA_TXT[]   = { "USA! USA! USA!", "Land of the Free", "Home of the Brave",
+                                     "1776", "We the People", "Don't Tread on Me",
+                                     "Life, Liberty, Happiness", "E Pluribus Unum",
+                                     "Give me Liberty", "Stars and Stripes Forever" };
   static const char* COMMON_TXT[] = {
     "Differential girdlespring: Connects the up-and-down parts to the analytical line.",
     "Sperry bearings: Parts used to balance the machine against a specific type of fake magnetic pull.",
@@ -3496,10 +3540,10 @@ void MenuFunctions::runScreensaver() {
     "Lotus-o-delta type stator: A main power coil that helps stop electric feedback.",
     "Capacitive diractance: A fake electronic force that works against regular power resistance.",
     "Malleable logarithmic casing: The strong outer shell designed to hold the gears together." };
-  const char** BASE = hacker ? HACK_TXT : NULL;
-  int nbase = hacker ? 7 : 0;
+  const char** BASE = hacker ? HACK_TXT : (patriot ? USA_TXT : NULL);
+  int nbase = hacker ? 7 : (patriot ? 10 : 0);
   int ncommon = 7;
-  int NPHR = nbase + ncommon;
+  int NPHR = patriot ? nbase : (nbase + ncommon);   // Patriot shows only its own phrases
   int phrase = -1;
   uint32_t lastPhrase = 0;
   bool firstPhrase = true;
@@ -3530,6 +3574,20 @@ void MenuFunctions::runScreensaver() {
         if (y - 1 >= 0 && y - 1 < nrows && !db) { buf[0] = SET[random(0, nch)]; t.setTextColor(0x0320, TFT_BLACK); t.drawString(buf, x, dy); }
         int yt = y - TRAIL;
         if (yt >= 0 && yt < nrows && !tb) t.fillRect(x, ty2, CW, CH, TFT_BLACK);
+        hrain_drop[c]++;
+        if (hrain_drop[c] - TRAIL > nrows) hrain_drop[c] = -(int)random(0, 20);
+      }
+    } else if (patriot) {
+      // Star rain: '*' glyphs falling in cycling red / white / blue over navy.
+      static const uint16_t PC[3] = { TFT_WHITE, TFT_RED, 0x24BF };
+      t.setFreeFont(NULL); t.setTextSize(1); t.setTextDatum(TL_DATUM);
+      for (int c = 0; c < ncols; c++) {
+        int y = hrain_drop[c], x = c * CW, hy = y * CH, ty2 = (y - TRAIL) * CH;
+        bool hb = (hy + CH > bandY0 && hy < bandY1);
+        bool tb = (ty2 + CH > bandY0 && ty2 < bandY1);
+        if (y >= 0 && y < nrows && !hb) { t.setTextColor(PC[c % 3], bg0); t.drawString("*", x, hy); }
+        int yt = y - TRAIL;
+        if (yt >= 0 && yt < nrows && !tb) t.fillRect(x, ty2, CW, CH, bg0);
         hrain_drop[c]++;
         if (hrain_drop[c] - TRAIL > nrows) hrain_drop[c] = -(int)random(0, 20);
       }
@@ -3573,19 +3631,21 @@ void MenuFunctions::runScreensaver() {
       }
 
       // Clear the previous band, compute the new one centred, remember it.
-      t.fillRect(0, prevBandY0, W, prevBandY1 - prevBandY0, TFT_BLACK);
+      t.fillRect(0, prevBandY0, W, prevBandY1 - prevBandY0, bg0);
       int totalH = 0; for (int i = 0; i < nAll; i++) totalH += 8 * lineSize[i] + 4;
       int y0 = bcy - totalH / 2;
       bandY0 = y0 - 2; bandY1 = y0 + totalH + 2;
       prevBandY0 = bandY0; prevBandY1 = bandY1;
 
+      static const uint16_t USA_LINE[3] = { TFT_WHITE, TFT_RED, 0x24BF };  // Patriot: white/red/blue per line
       t.setFreeFont(NULL); t.setTextDatum(TL_DATUM);
       int ly = y0;
       for (int i = 0; i < nAll; i++) {
         int sz = lineSize[i], cw = 6 * sz, lh = 8 * sz + 4, llen = strlen(lineText[i]);
         int lx = (W - llen * cw) / 2; if (lx < 0) lx = 0;         // centre-align each line
         t.setTextSize(sz);
-        t.setTextColor(hacker ? 0x07E0 : TFT_WHITE, TFT_BLACK);   // Hacker = green, others = white, on black
+        uint16_t fg = patriot ? USA_LINE[i % 3] : (hacker ? 0x07E0 : TFT_WHITE);
+        t.setTextColor(fg, bg0);
         t.drawString(lineText[i], lx, ly);
         ly += lh;
       }

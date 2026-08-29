@@ -28,13 +28,17 @@ The dual-app trick and the TouchBoard app are hord-brayden's. This fork:
 - **Ports the whole thing to the 4″ ST7796 resistive CYD** (`CYD_35`) — a
   different display and a different (XPT2046) touch controller than the 2.4″
   original. TouchBoard's LovyanGFX panel + touch config were rebuilt for it.
-- **A theme engine** — Light / Dark / **Hacker**, chosen from a
-  "Toggle Theme" picker and remembered across reboots, in *both* apps.
+- **A theme engine** — Light / Dark / **Hacker** / **USA Patriot**, chosen from
+  a "Toggle Theme" picker and remembered across reboots, in *both* apps.
   - **Hacker:** black + neon-green with grey outlines, custom procedural glyphs,
     and live "Matrix" digital rain flowing behind the menus.
+  - **USA Patriot:** navy background with red/white/blue menus (flag-striped
+    keys on the keyboard), star / flag / shield glyphs, and a star-spangled
+    screensaver.
 - **A dimmed idle screensaver** (in both apps) — after ~25s untouched the screen
-  drops to 40% and plays a themed animation (Matrix rain) with
-  large, random, word-wrapped cycling quotes; tap to wake.
+  drops to 40% and plays a themed animation (Matrix rain, or a red/white/blue
+  star rain in USA Patriot) with large, random, word-wrapped cycling quotes;
+  tap to wake.
 - **Brightness control** (PWM, ±10%) and **on-screen touch recalibration**.
 - **A JetBrains Mono UI** — full-width tappable menu rows with separators,
   horizontal marquee for long labels, on-screen scroll arrows, snappier menus.
@@ -102,7 +106,7 @@ screen, and what to do with what you capture — is in
   dual-app mod this build forks and extends.
 - **[WilkinsonRyan](https://github.com/WilkinsonRyan)** — the 4″ ST7796 (`CYD_35`)
   port of the whole thing, and the interface layer added on top of both apps:
-  the Light / Dark / Hacker theme engine, the Matrix screensaver,
+  the Light / Dark / Hacker / USA Patriot theme engine, the Matrix + star-spangled screensavers,
   brightness control, touch recalibration, the JetBrains Mono UI,
   and exposing the AP Mimic attack.
 
