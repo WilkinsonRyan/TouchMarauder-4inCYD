@@ -162,6 +162,14 @@ static ActiveKey down = { nullptr, 0, 0, 0, 0, -1, false };
 static bool lastConn  = false;
 static int  lastBonds = -1;
 
+// ---------------- Home launcher ----------------
+// A full-screen app launcher, opened by the Home button at the left of the
+// status strip. Lives inside this (keyboard) program; "Open Marauder" reboots
+// into the other app slot. Books/Soundboard/MIDI are placeholders until built.
+static bool homeOpen     = false;
+static int  homeDownTile = -1;
+static const int HOME_BTN_W = 36;   // tap zone at the strip's left edge
+
 static uint32_t ss_last_activity = 0;   // idle-screensaver timer (declared early: used in ui_onTouchDown)
 static int      ss_drop[64];
 
@@ -284,12 +292,23 @@ static int drawBatteryGlyph() {
   return txtRight - tft.textWidth(pb);
 }
 
+// Little house icon for the Home button (left of the status strip).
+static void drawHomeIcon(int cx, int cy) {
+  tft.fillTriangle(cx, cy - 8, cx - 9, cy + 1, cx + 9, cy + 1, COL_TEXT);  // roof
+  tft.fillRect(cx - 6, cy + 1, 12, 8, COL_TEXT);                           // body
+  tft.fillRect(cx - 2, cy + 4, 4, 5, COL_TAB);                            // door cutout
+}
+
 // ---------------- preview / status strip ----------------
 static void drawStrip() {
   tft.fillRect(0, STRIP_Y, SCREEN_W, STRIP_H, COL_TAB);
+  int scy = STRIP_Y + STRIP_H / 2;
+  drawHomeIcon(16, scy);                       // Home button, far left (opposite the battery)
   bool conn = hidkb_connected();
-  tft.fillCircle(14, STRIP_Y + STRIP_H / 2, 5, conn ? COL_OK : COL_ADV);
+  tft.fillCircle(46, scy, 5, conn ? COL_OK : COL_ADV);   // conn dot, shifted right of Home
   int battLeft = drawBatteryGlyph();   // right-aligned; other strip text stays left of this
+
+  if (homeOpen) return;   // on the launcher, the strip is just Home + battery
 
   tft.setTextDatum(textdatum_t::middle_left);
   tft.setFont(&fonts::FreeSans9pt7b);
@@ -736,7 +755,71 @@ static void qwertyTouchUp() {
 }
 
 // ---------------- full redraw ----------------
+// ---------------- Home launcher screen ----------------
+struct HomeTile { const char* label; uint8_t act; bool ready; };
+enum { HACT_KB = 0, HACT_MARAUDER, HACT_SOON };
+static const HomeTile HOME_TILES[] = {
+  { "Keyboard",   HACT_KB,       true  },
+  { "Marauder",   HACT_MARAUDER, true  },
+  { "Books",      HACT_SOON,     false },
+  { "Soundboard", HACT_SOON,     false },
+  { "MIDI",       HACT_SOON,     false },
+};
+static const int HOME_N = sizeof(HOME_TILES) / sizeof(HOME_TILES[0]);
+
+static void homeTileRect(int i, int& x, int& y, int& w, int& h) {
+  const int cols = 2;
+  int gy = AREA_Y + 8;
+  int gh = SCREEN_H - gy - 8;
+  int rows = (HOME_N + cols - 1) / cols;
+  int cw = SCREEN_W / cols;
+  int rh = gh / rows;
+  int r = i / cols, c = i % cols;
+  x = c * cw + 8;  y = gy + r * rh + 6;
+  w = cw - 16;     h = rh - 12;
+}
+
+static void drawHomeTile(int i, bool pressed) {
+  int x, y, w, h; homeTileRect(i, x, y, w, h);
+  const HomeTile& t = HOME_TILES[i];
+  uint16_t bg = !t.ready ? COL_KEY : (pressed ? COL_KEY_DOWN : COL_KEY_SPEC);
+  if (patriotOn() && t.ready && !pressed)
+    bg = patriotKeyColor(x + w / 2, y + h / 2, 0, AREA_Y, SCREEN_W, SCREEN_H - AREA_Y);
+  tft.fillRoundRect(x, y, w, h, 8, bg);
+  keyOutlineRect(x, y, w, h, 8);
+  tft.setTextDatum(textdatum_t::middle_center);
+  tft.setFont(&fonts::FreeSansBold12pt7b);
+  tft.setTextColor(t.ready ? COL_TEXT : COL_DIM, bg);
+  tft.drawString(t.label, x + w / 2, y + h / 2 - (t.ready ? 0 : 8));
+  if (!t.ready) {
+    tft.setFont(&fonts::FreeSans9pt7b);
+    tft.setTextColor(COL_DIM, bg);
+    tft.drawString("Soon", x + w / 2, y + h / 2 + 12);
+  }
+}
+
+static int homeHitTest(int tx, int ty) {
+  for (int i = 0; i < HOME_N; i++) {
+    int x, y, w, h; homeTileRect(i, x, y, w, h);
+    if (tx >= x && tx < x + w && ty >= y && ty < y + h) return i;
+  }
+  return -1;
+}
+
+static void drawHome() {
+  tft.setRotation(0);
+  tft.fillScreen(COL_BG);
+  tft.fillRect(0, 0, SCREEN_W, TAB_H, COL_TAB);          // header bar
+  tft.setTextDatum(textdatum_t::middle_center);
+  tft.setFont(&fonts::FreeSansBold12pt7b);
+  tft.setTextColor(COL_TAB_ON, COL_TAB);
+  tft.drawString("Home", SCREEN_W / 2, TAB_H / 2);
+  drawStrip();                                           // Home button + battery
+  for (int i = 0; i < HOME_N; i++) drawHomeTile(i, false);
+}
+
 static void drawView() {
+  if (homeOpen) { drawHome(); return; }
   if (curView == VIEW_QWERTY) { tft.setRotation(3); drawQwerty(); return; }  // landscape (flipped)
   tft.setRotation(0);          // every other screen is portrait (flipped 180° to match Marauder)
   drawTabs();
@@ -762,6 +845,18 @@ static void drawView() {
 void ui_onTouchDown(int tx, int ty) {
   ss_last_activity = millis();   // reset the screensaver idle timer
   if (curView == VIEW_QWERTY) { qwertyTouchDown(tx, ty); return; }  // landscape, own coords
+
+  // Home button (left of the strip) toggles the launcher, from any portrait view.
+  if (tx < HOME_BTN_W && ty >= STRIP_Y && ty < STRIP_Y + STRIP_H) {
+    homeOpen = !homeOpen;
+    drawView();
+    return;
+  }
+  if (homeOpen) {                       // launcher is up: only tiles are live
+    homeDownTile = homeHitTest(tx, ty);
+    if (homeDownTile >= 0) drawHomeTile(homeDownTile, true);
+    return;
+  }
 
   down = { nullptr, 0, 0, 0, 0, -1, false };
 
@@ -812,6 +907,19 @@ void ui_onTouchDown(int tx, int ty) {
 
 void ui_onTouchUp() {
   if (curView == VIEW_QWERTY) { qwertyTouchUp(); return; }
+
+  if (homeOpen) {                       // launcher: act on the released tile
+    int i = homeDownTile; homeDownTile = -1;
+    if (i < 0) return;
+    if (!HOME_TILES[i].ready) { drawHomeTile(i, false); return; }   // "Soon" tiles do nothing
+    switch (HOME_TILES[i].act) {
+      case HACT_KB:       homeOpen = false; curView = VIEW_KB; drawView(); break;
+      case HACT_MARAUDER: switchToApp(ESP_PARTITION_SUBTYPE_APP_OTA_0, "Marauder"); break;
+      default:            drawHomeTile(i, false); break;
+    }
+    return;
+  }
+
   if (curView == VIEW_KB && !down.valid) { t9TouchUp(); return; }
   if (!down.valid) return;
   ActiveKey k = down;
@@ -1109,7 +1217,7 @@ void ui_tick(uint32_t now) {
     lastConn = conn;
     lastBonds = bonds;
     if (curView != VIEW_QWERTY) drawStrip();   // strip is portrait-only
-    if (curView == VIEW_BT && btScreen == BTS_INFO) drawBTView();  // don't clobber settings/theme screens
+    if (!homeOpen && curView == VIEW_BT && btScreen == BTS_INFO) drawBTView();  // don't clobber settings/theme/home screens
   }
 
   // Battery: sample slowly, and only touch the screen / BLE when the % actually
