@@ -17,6 +17,8 @@
 #include <ctype.h>
 #include <Preferences.h>     // persist theme + brightness in NVS
 #include <SD.h>              // Books reader: read .txt files from the microSD card
+#include <string.h>          // memcmp/memset for WAV + thumbnail headers
+#include "driver/dac_continuous.h"   // Soundboard: stream WAV to the internal DAC (GPIO26)
 #include "ui.h"
 #include "config.h"
 #include "display.h"
@@ -182,6 +184,9 @@ static bool settingsOpen  = false;
 static int  settingsDown  = -1;
 static const int GEAR_X0 = 40, GEAR_X1 = 74;   // gear tap zone, just right of Home
 
+// Soundboard app.
+static bool sbActive = false;
+
 static uint32_t ss_last_activity = 0;   // idle-screensaver timer (declared early: used in ui_onTouchDown)
 static int      ss_drop[64];
 
@@ -333,7 +338,7 @@ static void drawStrip() {
   tft.fillCircle(84, scy, 5, conn ? COL_OK : COL_ADV);   // conn dot, right of the gear
   int battLeft = drawBatteryGlyph();   // right-aligned; other strip text stays left of this
 
-  if (homeOpen || booksMode != BM_NONE || settingsOpen) return;   // overlays: strip is just Home + gear + battery
+  if (homeOpen || booksMode != BM_NONE || settingsOpen || sbActive) return;   // overlays: strip is just Home + gear + battery
 
   tft.setTextDatum(textdatum_t::middle_left);
   tft.setFont(&fonts::FreeSans9pt7b);
@@ -782,12 +787,12 @@ static void qwertyTouchUp() {
 // ---------------- full redraw ----------------
 // ---------------- Home launcher screen ----------------
 struct HomeTile { const char* label; uint8_t act; bool ready; };
-enum { HACT_KB = 0, HACT_MARAUDER, HACT_BOOKS, HACT_SOON };
+enum { HACT_KB = 0, HACT_MARAUDER, HACT_BOOKS, HACT_SOUND, HACT_SOON };
 static const HomeTile HOME_TILES[] = {
   { "Keyboard",   HACT_KB,       true  },
   { "Marauder",   HACT_MARAUDER, true  },
   { "Books",      HACT_BOOKS,    true  },
-  { "Soundboard", HACT_SOON,     false },
+  { "Soundboard", HACT_SOUND,    true  },
   { "MIDI",       HACT_SOON,     false },
 };
 static const int HOME_N = sizeof(HOME_TILES) / sizeof(HOME_TILES[0]);
@@ -1171,6 +1176,124 @@ static void booksMarqueeTick(uint32_t now) {
   }
 }
 
+// ================= Soundboard =================
+// Plays PCM .wav files from /Sounds on the SD card through the internal DAC
+// (GPIO26) + onboard amp (enable on GPIO4). Playback is blocking (short clips).
+static String   sbNames[36]; static int sbCount = 0;
+static int      sbDownIdx = -1;
+static dac_continuous_handle_t s_dac = nullptr;
+
+static bool wavPlay(const String& path) {
+  File f = SD.open(path.c_str());
+  if (!f) return false;
+  uint8_t riff[12];
+  if (f.read(riff, 12) != 12 || memcmp(riff, "RIFF", 4) != 0 || memcmp(riff + 8, "WAVE", 4) != 0) { f.close(); return false; }
+  uint32_t rate = 22050, dataLen = 0; uint16_t bits = 16, ch = 1; long dataPos = -1;
+  while (f.position() + 8 <= f.size()) {
+    uint8_t hd[8]; if (f.read(hd, 8) != 8) break;
+    uint32_t sz = (uint32_t)hd[4] | ((uint32_t)hd[5] << 8) | ((uint32_t)hd[6] << 16) | ((uint32_t)hd[7] << 24);
+    if (memcmp(hd, "fmt ", 4) == 0) {
+      uint8_t fmt[16]; if (f.read(fmt, 16) != 16) { f.close(); return false; }
+      ch   = (uint16_t)(fmt[2] | (fmt[3] << 8));
+      rate = (uint32_t)(fmt[4] | (fmt[5] << 8) | (fmt[6] << 16) | ((uint32_t)fmt[7] << 24));
+      bits = (uint16_t)(fmt[14] | (fmt[15] << 8));
+      if (sz > 16) f.seek(f.position() + (sz - 16));
+    } else if (memcmp(hd, "data", 4) == 0) { dataPos = f.position(); dataLen = sz; break; }
+    else f.seek(f.position() + sz + (sz & 1));
+  }
+  if (dataPos < 0 || ch < 1 || (bits != 8 && bits != 16)) { f.close(); return false; }
+  if (rate < 4000) rate = 4000; if (rate > 48000) rate = 48000;
+
+  dac_continuous_config_t cfg; memset(&cfg, 0, sizeof(cfg));
+  cfg.chan_mask = DAC_CHANNEL_MASK_CH1;         // GPIO26
+  cfg.desc_num  = 4;
+  cfg.buf_size  = 2048;
+  cfg.freq_hz   = rate;
+  cfg.offset    = 0;
+  cfg.clk_src   = DAC_DIGI_CLK_SRC_DEFAULT;
+  cfg.chan_mode = DAC_CHANNEL_MODE_SIMUL;
+  if (dac_continuous_new_channels(&cfg, &s_dac) != ESP_OK) { f.close(); return false; }
+  dac_continuous_enable(s_dac);
+  pinMode(PIN_AUDIO_EN, OUTPUT); digitalWrite(PIN_AUDIO_EN, LOW);   // amp on
+
+  f.seek(dataPos);
+  uint32_t remaining = dataLen;
+  static uint8_t rd[2048], out[2048];
+  while (remaining > 0) {
+    int want = remaining < sizeof(rd) ? (int)remaining : (int)sizeof(rd);
+    int got = f.read(rd, want); if (got <= 0) break; remaining -= got;
+    int n = 0;
+    if (bits == 8) { for (int i = 0; i < got; i += ch) out[n++] = rd[i]; }        // 8-bit is already unsigned
+    else { int step = 2 * ch;
+      for (int i = 0; i + 1 < got; i += step) { int16_t s = (int16_t)(rd[i] | (rd[i + 1] << 8));
+        int v = (s >> 8) + 128; if (v < 0) v = 0; if (v > 255) v = 255; out[n++] = (uint8_t)v; } }
+    size_t written = 0; if (n > 0) dac_continuous_write(s_dac, out, n, &written, 2000);
+  }
+  digitalWrite(PIN_AUDIO_EN, HIGH);                                 // amp off
+  dac_continuous_disable(s_dac); dac_continuous_del_channels(s_dac); s_dac = nullptr;
+  f.close(); return true;
+}
+
+static const int SB_COLS = 3;
+static void sbCellRect(int i, int& x, int& y, int& w, int& h) {
+  int top = AREA_Y + 6, cellW = SCREEN_W / SB_COLS, cellH = 58;
+  int r = i / SB_COLS, c = i % SB_COLS;
+  x = c * cellW + 5; y = top + r * cellH; w = cellW - 10; h = cellH - 8;
+}
+static void sbDrawCell(int i, bool pressed) {
+  int x, y, w, h; sbCellRect(i, x, y, w, h);
+  tft.fillRoundRect(x, y, w, h, 6, pressed ? COL_KEY_DOWN : COL_KEY_SPEC);
+  keyOutlineRect(x, y, w, h, 6);
+  String n = sbNames[i]; if (n.length() > 4) n = n.substring(0, n.length() - 4);   // drop .wav
+  tft.setFont(&fonts::FreeSans9pt7b); tft.setTextDatum(textdatum_t::middle_center);
+  tft.setTextColor(COL_TEXT, pressed ? COL_KEY_DOWN : COL_KEY_SPEC);
+  while (n.length() > 1 && tft.textWidth(n) > w - 8) n = n.substring(0, n.length() - 1);
+  tft.drawString(n, x + w / 2, y + h / 2);
+}
+static void sbScan() {
+  sbCount = 0;
+  if (!sdReady()) return;
+  if (!SD.exists("/Sounds")) SD.mkdir("/Sounds");
+  File dir = SD.open("/Sounds");
+  if (dir && dir.isDirectory()) { File e;
+    while ((e = dir.openNextFile()) && sbCount < 36) {
+      String n = e.name(); int sl = n.lastIndexOf('/'); if (sl >= 0) n = n.substring(sl + 1);
+      if (n.length() && n[0] != '.') { String low = n; low.toLowerCase(); if (low.endsWith(".wav")) sbNames[sbCount++] = n; }
+      e.close(); }
+    dir.close(); }
+}
+static void sbDraw() {
+  sbActive = true; homeOpen = false; booksMode = BM_NONE; settingsOpen = false; curView = VIEW_KB;
+  tft.setRotation(0); tft.fillScreen(COL_BG);
+  tft.fillRect(0, 0, SCREEN_W, TAB_H, COL_TAB);
+  tft.setTextDatum(textdatum_t::middle_center); tft.setFont(&fonts::FreeSansBold12pt7b);
+  tft.setTextColor(COL_TAB_ON, COL_TAB); tft.drawString("Soundboard", SCREEN_W / 2, TAB_H / 2);
+  drawStrip();
+  tft.setTextDatum(textdatum_t::top_left); tft.setTextColor(COL_TEXT, COL_BG); tft.setFont(&fonts::FreeSans9pt7b);
+  if (!sdReady()) { tft.drawString("SD card not found.", 8, AREA_Y + 10); return; }
+  sbScan();
+  if (sbCount == 0) {
+    tft.drawString("No sounds yet.", 8, AREA_Y + 10);
+    tft.drawString("Put .wav files in the", 8, AREA_Y + 34);
+    tft.drawString("Sounds folder on the SD card.", 8, AREA_Y + 54);
+    return;
+  }
+  int top = AREA_Y + 6, cellH = 58; int maxRows = (SCREEN_H - top) / cellH, maxCells = maxRows * SB_COLS;
+  for (int i = 0; i < sbCount && i < maxCells; i++) sbDrawCell(i, false);
+}
+static void sbEnter() { curView = VIEW_KB; sbActive = true; sdReady(); sbDraw(); }
+static void sbTouchDown(int x, int y) {
+  sbDownIdx = -1;
+  int top = AREA_Y + 6, cellH = 58; int maxRows = (SCREEN_H - top) / cellH, maxCells = maxRows * SB_COLS;
+  for (int i = 0; i < sbCount && i < maxCells; i++) { int cx, cy, cw, ch; sbCellRect(i, cx, cy, cw, ch);
+    if (x >= cx && x < cx + cw && y >= cy && y < cy + ch) { sbDownIdx = i; sbDrawCell(i, true); break; } }
+}
+static void sbTouchUp() {
+  int i = sbDownIdx; sbDownIdx = -1; if (i < 0) return;
+  wavPlay("/Sounds/" + sbNames[i]);       // blocking; short clips
+  sbDrawCell(i, false);
+}
+
 // Settings overlay: the theme picker, reachable from any screen via the gear.
 static void drawSettings() {
   settingsOpen = true; homeOpen = false; booksMode = BM_NONE; curView = VIEW_KB;
@@ -1187,6 +1310,7 @@ static void drawSettings() {
 static void drawView() {
   if (homeOpen) { drawHome(); return; }
   if (settingsOpen) { drawSettings(); return; }
+  if (sbActive) { sbDraw(); return; }
   if (booksMode == BM_AUTHORS) { booksDrawAuthors(); return; }
   if (booksMode == BM_LIBRARY) { booksDrawLibrary(); return; }
   if (booksMode == BM_READ)    { booksShowPage(curTop); return; }
@@ -1218,7 +1342,7 @@ void ui_onTouchDown(int tx, int ty) {
 
   // Home button (left of the strip) toggles the launcher, from any portrait view.
   if (tx < HOME_BTN_W && ty >= STRIP_Y && ty < STRIP_Y + STRIP_H) {
-    booksMode = BM_NONE; settingsOpen = false;   // leaving Books/Settings if we were in them
+    booksMode = BM_NONE; settingsOpen = false; sbActive = false;   // leaving any app overlay
     homeOpen = !homeOpen;
     drawView();
     return;
@@ -1241,6 +1365,7 @@ void ui_onTouchDown(int tx, int ty) {
       }
     return;
   }
+  if (sbActive) { sbTouchDown(tx, ty); return; }
   if (booksMode != BM_NONE) { booksTouchDown(tx, ty); return; }
 
   down = { nullptr, 0, 0, 0, 0, -1, false };
@@ -1301,6 +1426,7 @@ void ui_onTouchUp() {
       case HACT_KB:       homeOpen = false; curView = VIEW_KB; drawView(); break;
       case HACT_MARAUDER: switchToApp(ESP_PARTITION_SUBTYPE_APP_OTA_0, "Marauder"); break;
       case HACT_BOOKS:    homeOpen = false; booksEnter(); break;
+      case HACT_SOUND:    homeOpen = false; sbEnter(); break;
       default:            drawHomeTile(i, false); break;
     }
     return;
@@ -1318,6 +1444,7 @@ void ui_onTouchUp() {
     }
     return;
   }
+  if (sbActive) { sbTouchUp(); return; }
   if (booksMode != BM_NONE) { booksTouchUp(); return; }
 
   if (curView == VIEW_KB && !down.valid) { t9TouchUp(); return; }
@@ -1618,7 +1745,7 @@ void ui_tick(uint32_t now) {
     lastConn = conn;
     lastBonds = bonds;
     if (curView != VIEW_QWERTY) drawStrip();   // strip is portrait-only
-    if (!homeOpen && !settingsOpen && booksMode == BM_NONE && curView == VIEW_BT && btScreen == BTS_INFO) drawBTView();  // don't clobber overlays
+    if (!homeOpen && !settingsOpen && !sbActive && booksMode == BM_NONE && curView == VIEW_BT && btScreen == BTS_INFO) drawBTView();  // don't clobber overlays
   }
 
   // Battery: sample slowly, and only touch the screen / BLE when the % actually

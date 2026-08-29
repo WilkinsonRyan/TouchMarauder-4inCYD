@@ -43,6 +43,13 @@
 #define PIN_LED_G     16
 #define PIN_LED_B     17
 
+// ---------- Audio (Soundboard) ----------
+// This 4" CYD has an onboard audio amp fed by the ESP32 DAC on GPIO26, with the
+// amp's enable on GPIO4 (LOW = on). We drive GPIO26 via the DAC and pull GPIO4
+// low only while a clip plays. If your board has no speaker/amp, no sound.
+#define PIN_AUDIO_EN  4     // amp shutdown/enable (LOW = amp on)
+// (DAC output is fixed by hardware to GPIO26 = DAC channel 1.)
+
 // ---------- microSD card (shared VSPI bus: SCK 18 / MISO 19 / MOSI 23) ----------
 // The SD slot is on the ESP32's default (VSPI) SPI bus, separate from the
 // display (which LovyanGFX drives on HSPI 12/13/14), so the two don't collide.
