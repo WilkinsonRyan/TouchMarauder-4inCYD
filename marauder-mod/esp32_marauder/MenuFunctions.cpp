@@ -5,6 +5,7 @@
 #include "TouchDrvGT911.hpp"
 #include "esp_ota_ops.h"        // dual-boot: hand off to the TouchBoard app slot (ota_1)
 #include "esp_partition.h"
+#include <Preferences.h>        // cross-app "open Home" flag for the launcher
 
 // ▲▼ scroll-arrow geometry: a slim column on the right edge of the menu area.
 // Defined here (before main()) so both the touch handler and the draw code see it.
@@ -843,6 +844,20 @@ void MenuFunctions::main(uint32_t currentTime)
       pressed = this->updateTouch(&t_x, &t_y);
     #endif
       if (pressed) this->last_activity_ms = millis();   // reset the screensaver idle timer
+
+      // Global Home button: a tap on the top-left status-bar corner (only while
+      // on a menu, not mid-scan) jumps to the TouchBoard Home launcher.
+      #if defined(HAS_ST7796)
+      {
+        static bool home_armed = true;
+        if (pressed && wifi_scan_obj.currentScanMode == WIFI_SCAN_OFF
+            && (int)t_x < 40 && (int)t_y < 22) {
+          if (home_armed) { home_armed = false; this->goHome(); }   // reboots; no return needed
+        } else if (!pressed) {
+          home_armed = true;
+        }
+      }
+      #endif
       
     #ifdef HAS_SCREEN
     if ((wifi_scan_obj.currentScanMode != WIFI_SCAN_OFF) &&
@@ -1453,6 +1468,28 @@ void MenuFunctions::batteryCYD(bool initial)
   t.drawString((String)pct + "%", tx, 0, 2);
 }
 
+// Home button — a small house at the far left of the status bar (opposite the
+// battery). Tapping it (handled in main()) jumps to the TouchBoard Home launcher.
+void MenuFunctions::drawHomeButton()
+{
+  TFT_eSPI& t = display_obj.tft;
+  int cx = 14, cy = STATUS_BAR_WIDTH / 2;
+  t.fillRect(0, 0, 30, STATUS_BAR_WIDTH, STATUSBAR_COLOR);         // clear the corner
+  t.fillTriangle(cx, cy - 6, cx - 7, cy + 1, cx + 7, cy + 1, TFT_WHITE);  // roof
+  t.fillRect(cx - 5, cy + 1, 10, 6, TFT_WHITE);                    // body
+  t.fillRect(cx - 2, cy + 3, 4, 4, STATUSBAR_COLOR);              // door cutout
+}
+
+// Reboot into the TouchBoard app (ota_1) and ask it to open the Home launcher.
+void MenuFunctions::goHome()
+{
+  Preferences ap; ap.begin("applink", false); ap.putBool("home", true); ap.end();
+  const esp_partition_t* p = esp_partition_find_first(
+      ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, NULL);
+  if (p) esp_ota_set_boot_partition(p);
+  ESP.restart();
+}
+
 void MenuFunctions::updateStatusBar()
 {
   display_obj.tft.setTextSize(1);
@@ -1616,6 +1653,7 @@ void MenuFunctions::updateStatusBar()
     display_obj.tft.setTextColor(the_color, STATUSBAR_COLOR);
     display_obj.tft.drawString("SD", TFT_WIDTH - 12, 0, 1);
   #endif
+  this->drawHomeButton();   // keep Home visible on every menu screen
 }
 
 void MenuFunctions::drawStatusBar()
@@ -1757,6 +1795,7 @@ void MenuFunctions::drawStatusBar()
     display_obj.tft.setTextColor(the_color, STATUSBAR_COLOR);
     display_obj.tft.drawString("SD", TFT_WIDTH - 12, 0, 1);
   #endif
+  this->drawHomeButton();   // keep Home visible on every menu screen
 }
 
 void MenuFunctions::orientDisplay()

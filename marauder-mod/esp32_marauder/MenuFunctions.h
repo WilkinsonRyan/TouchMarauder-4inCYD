@@ -216,6 +216,8 @@ class MenuFunctions
     void battery(bool initial = false);
     void battery2(bool initial = false);
     void batteryCYD(bool initial = false);   // clean GPIO34-only readout for the 4" CYD, drawn right of the SD icon
+    void drawHomeButton();                    // Home house icon at the left of the status bar (opposite the battery)
+    void goHome();                            // reboot into the TouchBoard app's Home launcher
     void showMenuList(Menu* menu, int layer);
     String callSetting(String key);
     void runBoolSetting(String ley);

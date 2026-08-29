@@ -1245,6 +1245,11 @@ void ui_begin() {
   applyBrightness();
   battery_begin();      // first sample so the strip has a real reading to draw
   hidkb_setBattery(battery_percent());   // seed the BLE battery char (was hardcoded 100)
+
+  // If Marauder's Home button sent us here, open the launcher on arrival.
+  { Preferences ap; ap.begin("applink", false);
+    if (ap.getBool("home", false)) { homeOpen = true; ap.putBool("home", false); }
+    ap.end(); }
   ss_last_activity = millis();   // start the screensaver idle timer fresh
   tft.fillScreen(COL_BG);
   drawView();
