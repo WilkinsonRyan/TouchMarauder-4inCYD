@@ -177,6 +177,11 @@ static const int HOME_BTN_W = 36;   // tap zone at the strip's left edge
 enum { BM_NONE = 0, BM_AUTHORS, BM_LIBRARY, BM_READ };
 static uint8_t booksMode = BM_NONE;
 
+// Settings overlay (theme picker), reachable from any screen via the gear button.
+static bool settingsOpen  = false;
+static int  settingsDown  = -1;
+static const int GEAR_X0 = 40, GEAR_X1 = 74;   // gear tap zone, just right of Home
+
 static uint32_t ss_last_activity = 0;   // idle-screensaver timer (declared early: used in ui_onTouchDown)
 static int      ss_drop[64];
 
@@ -306,16 +311,29 @@ static void drawHomeIcon(int cx, int cy) {
   tft.fillRect(cx - 2, cy + 4, 4, 5, COL_TAB);                            // door cutout
 }
 
+// Gear icon for the Settings button (just right of Home).
+static void drawGearIcon(int cx, int cy) {
+  tft.fillCircle(cx, cy, 7, COL_TEXT);
+  tft.fillRect(cx - 1, cy - 10, 3, 4, COL_TEXT);   // teeth: N / S / E / W
+  tft.fillRect(cx - 1, cy + 6,  3, 4, COL_TEXT);
+  tft.fillRect(cx - 10, cy - 1, 4, 3, COL_TEXT);
+  tft.fillRect(cx + 6,  cy - 1, 4, 3, COL_TEXT);
+  tft.fillRect(cx + 5, cy - 7, 3, 3, COL_TEXT);    // + two diagonals
+  tft.fillRect(cx - 7, cy + 5, 3, 3, COL_TEXT);
+  tft.fillCircle(cx, cy, 3, COL_TAB);              // hub hole
+}
+
 // ---------------- preview / status strip ----------------
 static void drawStrip() {
   tft.fillRect(0, STRIP_Y, SCREEN_W, STRIP_H, COL_TAB);
   int scy = STRIP_Y + STRIP_H / 2;
-  drawHomeIcon(16, scy);                       // Home button, far left (opposite the battery)
+  drawHomeIcon(16, scy);                        // Home button, far left (opposite the battery)
+  drawGearIcon(57, scy);                        // Settings button, just right of Home
   bool conn = hidkb_connected();
-  tft.fillCircle(46, scy, 5, conn ? COL_OK : COL_ADV);   // conn dot, shifted right of Home
+  tft.fillCircle(84, scy, 5, conn ? COL_OK : COL_ADV);   // conn dot, right of the gear
   int battLeft = drawBatteryGlyph();   // right-aligned; other strip text stays left of this
 
-  if (homeOpen || booksMode != BM_NONE) return;   // launcher/Books: strip is just Home + battery
+  if (homeOpen || booksMode != BM_NONE || settingsOpen) return;   // overlays: strip is just Home + gear + battery
 
   tft.setTextDatum(textdatum_t::middle_left);
   tft.setFont(&fonts::FreeSans9pt7b);
@@ -330,7 +348,7 @@ static void drawStrip() {
       tft.drawString(buf, SCREEN_W / 2, STRIP_Y + STRIP_H / 2);
     } else {
       tft.setTextColor(COL_DIM, COL_TAB);
-      tft.drawString(conn ? "ready" : "pair me", 28, STRIP_Y + STRIP_H / 2);
+      tft.drawString(conn ? "ready" : "pair me", 96, STRIP_Y + STRIP_H / 2);
     }
     tft.setTextDatum(textdatum_t::middle_right);
     tft.setFont(&fonts::FreeSansBold9pt7b);
@@ -339,7 +357,7 @@ static void drawStrip() {
                    battLeft - 6, STRIP_Y + STRIP_H / 2);
   } else {
     tft.setTextColor(conn ? COL_OK : COL_ADV, COL_TAB);
-    tft.drawString(conn ? "linked" : "pair me", 28, STRIP_Y + STRIP_H / 2);
+    tft.drawString(conn ? "linked" : "pair me", 96, STRIP_Y + STRIP_H / 2);
   }
 }
 
@@ -937,19 +955,52 @@ static bool imgSize(const String& path, int& w, int& h) {
   f.close(); return ok;
 }
 
-static void drawCover(const String& path, int x, int y, int boxW, int boxH) {
-  int w = 0, h = 0;
-  bool sized = path.length() && imgSize(path, w, h) && w > 0 && h > 0;
-  if (sized) {
-    float s = (float)boxW / w; float sy = (float)boxH / h; if (sy < s) s = sy; if (s > 1.0f) s = 1.0f;
-    int dw = (int)(w * s), dh = (int)(h * s), dx = x + (boxW - dw) / 2, dy = y + (boxH - dh) / 2;
-    String lp = path; lp.toLowerCase();
-    if      (lp.endsWith(".jpg") || lp.endsWith(".jpeg")) { tft.drawJpgFile(SD, path.c_str(), dx, dy, 0, 0, 0, 0, s, s); return; }
-    else if (lp.endsWith(".png"))                          { tft.drawPngFile(SD, path.c_str(), dx, dy, 0, 0, 0, 0, s, s); return; }
-    else if (lp.endsWith(".bmp"))                          { tft.drawBmpFile(SD, path.c_str(), dx, dy); return; }
+// Fast path: draw a previously cached thumbnail (raw RGB565 next to the cover).
+static bool thumbDraw(const String& cover, int x, int y, int boxW, int boxH) {
+  File f = SD.open((cover + ".thm").c_str());
+  if (!f) return false;
+  char m[4]; uint16_t w = 0, h = 0;
+  if (f.read((uint8_t*)m, 4) != 4 || memcmp(m, "THM1", 4) != 0) { f.close(); return false; }
+  f.read((uint8_t*)&w, 2); f.read((uint8_t*)&h, 2);
+  if (!w || !h || w > boxW || h > boxH) { f.close(); return false; }
+  size_t n = (size_t)w * h * 2; uint8_t* buf = (uint8_t*)malloc(n);
+  if (!buf) { f.close(); return false; }
+  bool ok = (f.read(buf, n) == (int)n); f.close();
+  if (ok) tft.pushImage(x + (boxW - w) / 2, y + (boxH - h) / 2, w, h, (uint16_t*)buf);
+  free(buf); return ok;
+}
+
+// Slow path (first view): decode the cover once into a scaled sprite, draw it,
+// and cache the sprite's pixels as <cover>.thm so future loads are instant.
+static void thumbMakeAndDraw(const String& cover, int x, int y, int boxW, int boxH, int fw, int fh) {
+  float s = (float)boxW / fw; float sy = (float)boxH / fh; if (sy < s) s = sy; if (s > 1.0f) s = 1.0f;
+  int dw = (int)(fw * s), dh = (int)(fh * s); if (dw < 1) dw = 1; if (dh < 1) dh = 1;
+  int dx = x + (boxW - dw) / 2, dy = y + (boxH - dh) / 2;
+  String lp = cover; lp.toLowerCase();
+  LGFX_Sprite spr(&tft); spr.setColorDepth(16);
+  if (spr.createSprite(dw, dh)) {
+    spr.fillScreen(COL_BG);
+    if      (lp.endsWith(".png")) spr.drawPngFile(SD, cover.c_str(), 0, 0, 0, 0, 0, 0, s, s);
+    else if (lp.endsWith(".bmp")) spr.drawBmpFile(SD, cover.c_str(), 0, 0);
+    else                          spr.drawJpgFile(SD, cover.c_str(), 0, 0, 0, 0, 0, 0, s, s);
+    spr.pushSprite(dx, dy);
+    File wf = SD.open((cover + ".thm").c_str(), "w");
+    if (wf) { uint16_t w = dw, h = dh; wf.write((const uint8_t*)"THM1", 4);
+              wf.write((uint8_t*)&w, 2); wf.write((uint8_t*)&h, 2);
+              wf.write((const uint8_t*)spr.getBuffer(), (size_t)dw * dh * 2); wf.close(); }
+    spr.deleteSprite();
+  } else {                                   // no RAM for a sprite: decode straight to screen (no cache)
+    if      (lp.endsWith(".png")) tft.drawPngFile(SD, cover.c_str(), dx, dy, 0, 0, 0, 0, s, s);
+    else if (lp.endsWith(".bmp")) tft.drawBmpFile(SD, cover.c_str(), dx, dy);
+    else                          tft.drawJpgFile(SD, cover.c_str(), dx, dy, 0, 0, 0, 0, s, s);
   }
-  // fallback: a plain book spine
-  tft.fillRoundRect(x, y, boxW, boxH, 6, COL_KEY);
+}
+
+static void drawCover(const String& path, int x, int y, int boxW, int boxH) {
+  if (path.length() && thumbDraw(path, x, y, boxW, boxH)) return;      // instant cached path
+  int w = 0, h = 0;
+  if (path.length() && imgSize(path, w, h) && w > 0 && h > 0) { thumbMakeAndDraw(path, x, y, boxW, boxH, w, h); return; }
+  tft.fillRoundRect(x, y, boxW, boxH, 6, COL_KEY);                     // fallback book spine
   keyOutlineRect(x, y, boxW, boxH, 6);
 }
 
@@ -1120,8 +1171,22 @@ static void booksMarqueeTick(uint32_t now) {
   }
 }
 
+// Settings overlay: the theme picker, reachable from any screen via the gear.
+static void drawSettings() {
+  settingsOpen = true; homeOpen = false; booksMode = BM_NONE; curView = VIEW_KB;
+  tft.setRotation(0); tft.fillScreen(COL_BG);
+  tft.fillRect(0, 0, SCREEN_W, TAB_H, COL_TAB);
+  tft.setTextDatum(textdatum_t::middle_center); tft.setFont(&fonts::FreeSansBold12pt7b);
+  tft.setTextColor(COL_TAB_ON, COL_TAB); tft.drawString("Settings", SCREEN_W / 2, TAB_H / 2);
+  drawStrip();
+  tft.setTextDatum(textdatum_t::top_left); tft.setFont(&fonts::FreeSans9pt7b);
+  tft.setTextColor(COL_DIM, COL_BG); tft.drawString("Theme", 12, AREA_Y + 10);
+  for (int i = 0; i < 5; i++) drawBTButton(TH_BTNS[i], TH_BTN_Y[i], false);
+}
+
 static void drawView() {
   if (homeOpen) { drawHome(); return; }
+  if (settingsOpen) { drawSettings(); return; }
   if (booksMode == BM_AUTHORS) { booksDrawAuthors(); return; }
   if (booksMode == BM_LIBRARY) { booksDrawLibrary(); return; }
   if (booksMode == BM_READ)    { booksShowPage(curTop); return; }
@@ -1153,14 +1218,27 @@ void ui_onTouchDown(int tx, int ty) {
 
   // Home button (left of the strip) toggles the launcher, from any portrait view.
   if (tx < HOME_BTN_W && ty >= STRIP_Y && ty < STRIP_Y + STRIP_H) {
-    booksMode = BM_NONE;                 // leaving Books if we were in it
+    booksMode = BM_NONE; settingsOpen = false;   // leaving Books/Settings if we were in them
     homeOpen = !homeOpen;
     drawView();
+    return;
+  }
+  // Settings gear (just right of Home) opens the theme picker from anywhere.
+  if (tx >= GEAR_X0 && tx < GEAR_X1 && ty >= STRIP_Y && ty < STRIP_Y + STRIP_H) {
+    drawSettings();
     return;
   }
   if (homeOpen) {                       // launcher is up: only tiles are live
     homeDownTile = homeHitTest(tx, ty);
     if (homeDownTile >= 0) drawHomeTile(homeDownTile, true);
+    return;
+  }
+  if (settingsOpen) {                   // theme picker: hit-test the buttons
+    settingsDown = -1;
+    for (int i = 0; i < 5; i++)
+      if (tx >= BT_BTN_X && tx < BT_BTN_X + BT_BTN_W && ty >= TH_BTN_Y[i] && ty < TH_BTN_Y[i] + BT_BTN_H) {
+        settingsDown = i; drawBTButton(TH_BTNS[i], TH_BTN_Y[i], true); break;
+      }
     return;
   }
   if (booksMode != BM_NONE) { booksTouchDown(tx, ty); return; }
@@ -1224,6 +1302,19 @@ void ui_onTouchUp() {
       case HACT_MARAUDER: switchToApp(ESP_PARTITION_SUBTYPE_APP_OTA_0, "Marauder"); break;
       case HACT_BOOKS:    homeOpen = false; booksEnter(); break;
       default:            drawHomeTile(i, false); break;
+    }
+    return;
+  }
+  if (settingsOpen) {                   // theme picker: apply the tapped theme
+    int i = settingsDown; settingsDown = -1;
+    if (i < 0) return;
+    switch (TH_BTNS[i]->action) {
+      case ACT_SET_LIGHT:  theme = TB_LIGHT;   applyTheme(); savePrefs(); drawSettings(); break;
+      case ACT_SET_DARK:   theme = TB_DARK;    applyTheme(); savePrefs(); drawSettings(); break;
+      case ACT_SET_HACKER: theme = TB_HACKER;  applyTheme(); savePrefs(); drawSettings(); break;
+      case ACT_SET_USA:    theme = TB_PATRIOT; applyTheme(); savePrefs(); drawSettings(); break;
+      case ACT_THEMES_BACK: settingsOpen = false; homeOpen = true; drawHome(); break;
+      default: drawSettings(); break;
     }
     return;
   }
@@ -1527,7 +1618,7 @@ void ui_tick(uint32_t now) {
     lastConn = conn;
     lastBonds = bonds;
     if (curView != VIEW_QWERTY) drawStrip();   // strip is portrait-only
-    if (!homeOpen && booksMode == BM_NONE && curView == VIEW_BT && btScreen == BTS_INFO) drawBTView();  // don't clobber other screens
+    if (!homeOpen && !settingsOpen && booksMode == BM_NONE && curView == VIEW_BT && btScreen == BTS_INFO) drawBTView();  // don't clobber overlays
   }
 
   // Battery: sample slowly, and only touch the screen / BLE when the % actually
