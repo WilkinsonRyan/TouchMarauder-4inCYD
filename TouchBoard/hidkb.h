@@ -26,3 +26,4 @@ void hidkb_tapChar(char c);
 
 void hidkb_restartAdvertising();
 void hidkb_clearBonds();      // forget all paired hosts + disconnect
+void hidkb_setBattery(uint8_t pct);   // report battery % to the paired host (0..100)

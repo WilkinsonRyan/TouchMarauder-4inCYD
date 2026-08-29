@@ -209,8 +209,8 @@ feeding them to an attack (Deauth Targeted, AP Mimic).
 
 ## 06 — Your device's own features
 
-- **Toggle Theme** (Settings) — Light / Dark / Hacker / Pride, remembered across
-  reboots. Hacker = neon-green + Matrix rain; Pride = rainbow menu items.
+- **Toggle Theme** (Settings) — Light / Dark / Hacker, remembered across
+  reboots. Hacker = neon-green + Matrix rain.
 - **Brightness +/−** and **Calibrate Touch** (Settings).
 - **Idle screensaver** — after ~25s the screen dims and plays a themed animation
   with cycling quotes; tap to wake.

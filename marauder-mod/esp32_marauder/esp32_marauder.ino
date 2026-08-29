@@ -143,7 +143,7 @@ uint32_t currentTime = 0;
 Preferences disp_prefs;
 uint8_t backlight_pct = 100;   // 10..100 %
 bool dark_mode = true;         // derived from ui_theme: true for any dark-bg theme
-unsigned char ui_theme = THEME_DARK;  // 0=Dark 1=Light 2=Hacker 3=Pride
+unsigned char ui_theme = THEME_DARK;  // 0=Dark 1=Light 2=Hacker
 #define BL_LEDC_CH   5
 #define BL_LEDC_FREQ 5000
 #define BL_LEDC_BITS 8
@@ -171,7 +171,7 @@ void loadDisplayPrefs() {
   backlight_pct = disp_prefs.getUChar("blpct", 100);
   // Theme: prefer the new key; fall back to the old dark/light bool for upgrades.
   ui_theme = disp_prefs.getUChar("theme", disp_prefs.getBool("dark", true) ? THEME_DARK : THEME_LIGHT);
-  if (ui_theme > THEME_PRIDE) ui_theme = THEME_DARK;
+  if (ui_theme > THEME_HACKER) ui_theme = THEME_DARK;   // clamp any stale value (e.g. the removed Pride)
   dark_mode = (ui_theme != THEME_LIGHT);
   disp_prefs.end();
   if (backlight_pct < 10) backlight_pct = 10;

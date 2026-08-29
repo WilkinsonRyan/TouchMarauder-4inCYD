@@ -42,3 +42,20 @@
 #define PIN_LED_R     4
 #define PIN_LED_G     16
 #define PIN_LED_B     17
+
+// ---------- Battery gauge (18650 on the CYD's onboard battery JST) ----------
+// The battery connector feeds this pin through an on-board resistor divider.
+// GPIO 34 is ADC1 + input-only, so it reads correctly even while Marauder's
+// WiFi is up (ADC2 pins go dead once WiFi starts) — this is the same pin the
+// Marauder half already uses for its own battery readout on this board.
+//
+// VERIFY before trusting the % on screen: define VBAT_DEBUG (below), open the
+// serial monitor, and compare the printed "cell=####mV" to a multimeter across
+// the 18650. If it reads ~half the real voltage, your board's divider is not
+// 1:2 — set VBAT_DIVIDER to the real ratio. If it's uniformly a few % off, nudge
+// VBAT_TRIM. If the pin is wrong for your board (reads ~0 or garbage), change
+// PIN_VBAT. If the Marauder half already shows a correct %, this pin is right.
+#define PIN_VBAT       34
+#define VBAT_DIVIDER   2.0f    // on-board divider ratio (cell V = pin V * this)
+#define VBAT_TRIM      1.0f    // fine calibration multiplier; leave 1.0 unless off
+//#define VBAT_DEBUG           // uncomment to print raw mV / % to serial for calibration

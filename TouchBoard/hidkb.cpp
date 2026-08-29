@@ -117,6 +117,11 @@ bool hidkb_begin() {
   return true;
 }
 
+void hidkb_setBattery(uint8_t pct) {
+  if (pct > 100) pct = 100;
+  if (g_hid) g_hid->setBatteryLevel(pct);   // updates the BLE Battery Service char
+}
+
 bool   hidkb_connected()   { return g_connected; }
 String hidkb_peerAddress() { return g_connected ? g_peerAddr : String(""); }
 int    hidkb_bondCount()   { return NimBLEDevice::getNumBonds(); }

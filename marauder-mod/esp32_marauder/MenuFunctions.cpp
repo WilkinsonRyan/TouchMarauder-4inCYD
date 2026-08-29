@@ -1235,8 +1235,8 @@ void MenuFunctions::main(uint32_t currentTime)
   else
     this->updateMarquees();   // scroll any menu labels too wide for the row
 
-  // Idle screensaver after ~25s of no touch (all themes: Hacker rain, Pride
-  // raining-men, or plain cycling quotes on Light/Dark).
+  // Idle screensaver after ~25s of no touch (Hacker rain, or plain cycling
+  // quotes on Light/Dark).
   if (wifi_scan_obj.currentScanMode == WIFI_SCAN_OFF
       && current_menu && current_menu->list
       && (millis() - this->last_activity_ms > 25000))
@@ -1371,6 +1371,55 @@ void MenuFunctions::battery2(bool initial)
 }
 #endif
 
+// Clean battery readout for the 4" CYD (ESP32-32E / ESP32-3248S035).
+// The board wires the cell through a 1:2 divider to GPIO34 (ADC1). We do NOT use
+// the stock analog path (BATTERY_ANALOG_ON): on this board its BATTERY_PIN(13) is
+// the display's MOSI and CHARGING_PIN(27) is the backlight, so toggling/reading
+// them corrupts the screen. This reads only GPIO34, undoes the divider, maps the
+// cell voltage to a percent on a Li-ion curve, and draws the icon + % just to the
+// right of the SD icon (SD sits at x=220). Repaints only when the % changes.
+void MenuFunctions::batteryCYD(bool initial)
+{
+  static bool  inited   = false;
+  static int   last_pct = -1;
+  static float ema_mv   = 0.0f;
+
+  if (!inited) {
+    analogReadResolution(12);
+    analogSetPinAttenuation(34, ADC_11db);   // ~2.5V full-scale; a full cell is ~2.1V through the /2 divider
+    inited = true;
+  }
+
+  // 5-sample median, then an exponential moving average so the radio's load
+  // spikes don't make the number twitch.
+  uint16_t s[5];
+  for (int i = 0; i < 5; i++) s[i] = analogReadMilliVolts(34);
+  for (int i = 1; i < 5; i++) { uint16_t v = s[i]; int j = i - 1; while (j >= 0 && s[j] > v) { s[j+1] = s[j]; j--; } s[j+1] = v; }
+  float cell_mv = s[2] * 2.0f;   // undo the 1:2 divider -> cell millivolts
+  if (ema_mv < 1.0f) ema_mv = cell_mv; else ema_mv += 0.2f * (cell_mv - ema_mv);
+
+  // Li-ion (single cell) voltage -> percent, linearly interpolated between points.
+  static const uint16_t cv[] = {4200,4100,4000,3900,3800,3750,3700,3650,3500,3300};
+  static const uint8_t  cp[] = { 100,  90,  80,  65,  50,  40,  30,  20,  10,   0};
+  int mv = (int)(ema_mv + 0.5f);
+  int pct;
+  if (mv >= cv[0])      pct = 100;
+  else if (mv <= cv[9]) pct = 0;
+  else { pct = 0; for (int i = 0; i < 9; i++) { if (mv <= cv[i] && mv >= cv[i+1]) { float f = (float)(mv - cv[i+1]) / (cv[i] - cv[i+1]); pct = (int)(cp[i+1] + f * (cp[i] - cp[i+1]) + 0.5f); break; } } }
+
+  if (!initial && pct == last_pct) return;   // nothing to repaint
+  last_pct = pct;
+
+  uint16_t color = pct < 20 ? TFT_RED : pct < 40 ? TFT_YELLOW : TFT_GREEN;
+
+  const int bx = 240;   // battery icon x — just right of the SD icon (x=220, 16px wide)
+  const int tx = 258;   // percent text x
+  display_obj.tft.fillRect(bx, 0, 90, STATUS_BAR_WIDTH, STATUSBAR_COLOR);
+  display_obj.tft.drawXBitmap(bx, 0, menu_icons[STATUS_BAT], 16, 16, STATUSBAR_COLOR, color);
+  display_obj.tft.setTextColor(color, STATUSBAR_COLOR);
+  display_obj.tft.drawString((String)pct + "%", tx, 0, 2);
+}
+
 void MenuFunctions::updateStatusBar()
 {
   display_obj.tft.setTextSize(1);
@@ -1467,8 +1516,7 @@ void MenuFunctions::updateStatusBar()
   #endif
 
   #ifdef HAS_ST7796
-    MenuFunctions::battery(false);
-    display_obj.tft.fillRect(280, 0, 16, STATUS_BAR_WIDTH, STATUSBAR_COLOR);
+    MenuFunctions::batteryCYD(false);
   #endif
 
   #ifdef HAS_ST7789
@@ -1610,8 +1658,12 @@ void MenuFunctions::drawStatusBar()
   #endif
 
 
-  MenuFunctions::battery(true);
-  display_obj.tft.fillRect(186, 0, 16, STATUS_BAR_WIDTH, STATUSBAR_COLOR);
+  #ifdef HAS_ST7796
+    MenuFunctions::batteryCYD(true);
+  #else
+    MenuFunctions::battery(true);
+    display_obj.tft.fillRect(186, 0, 16, STATUS_BAR_WIDTH, STATUSBAR_COLOR);
+  #endif
 
 
   #if defined(HAS_ILI9341) || defined(HAS_ST7796) || defined(HAS_ST7789)
@@ -2812,7 +2864,6 @@ void MenuFunctions::RunSetup()
   this->addNodes(&themeMenu, "Light Theme",  TFTWHITE,   NULL, 0, [this]() { this->setTheme(THEME_LIGHT);  });
   this->addNodes(&themeMenu, "Dark Theme",   TFTCYAN,    NULL, 0, [this]() { this->setTheme(THEME_DARK);   });
   this->addNodes(&themeMenu, "Hacker Theme", TFTGREEN,   NULL, 0, [this]() { this->setTheme(THEME_HACKER); });
-  this->addNodes(&themeMenu, "Pride Theme",  TFTMAGENTA, NULL, 0, [this]() { this->setTheme(THEME_PRIDE);  });
 
   // Specific setting menu
   specSettingMenu.parentMenu = &settingsMenu;
@@ -3174,22 +3225,6 @@ void MenuFunctions::renderGraphUI(uint8_t scan_mode) {
     display_obj.tft.println("Channel Marker");
 }
 
-// HSV (h in degrees 0..360, s/v 0..1) -> RGB565. Used by the Pride rainbow.
-static uint16_t hsv565(float h, float s, float v) {
-  float c = v * s;
-  float x = c * (1 - fabsf(fmodf(h / 60.0f, 2.0f) - 1));
-  float m = v - c;
-  float r, g, b;
-  if      (h <  60) { r = c; g = x; b = 0; }
-  else if (h < 120) { r = x; g = c; b = 0; }
-  else if (h < 180) { r = 0; g = c; b = x; }
-  else if (h < 240) { r = 0; g = x; b = c; }
-  else if (h < 300) { r = x; g = 0; b = c; }
-  else              { r = c; g = 0; b = x; }
-  uint8_t R = (uint8_t)((r + m) * 255), G = (uint8_t)((g + m) * 255), B = (uint8_t)((b + m) * 255);
-  return ((R & 0xF8) << 8) | ((G & 0xFC) << 3) | (B >> 3);
-}
-
 // Hacker theme text/icon palette: green-dominant with occasional neon blue/cyan
 // and a rare yellow, cycled by menu rank so adjacent rows read differently.
 // All greens are the same bright neon-green (darker greens were unreadable);
@@ -3203,25 +3238,13 @@ static const uint16_t HACKER_PAL[] = {
   0xFFE0,  // yellow (sparse)
 };
 
-// Themed colour for one menu item. Pride = rainbow spread red->violet with the
-// Back row held grey; Hacker = cycled greens/blues; Dark/Light = the base map.
+// Themed colour for one menu item. Hacker = cycled greens/blues with the Back
+// row held grey; Dark/Light = the base map.
 uint16_t MenuFunctions::itemColor(Menu* menu, int absIndex) {
   if (!menu || !menu->list || absIndex < 0 || absIndex >= menu->list->size())
     return getColor(TFTLIGHTGREY);
   MenuNode item = menu->list->get(absIndex);
   bool isBack = (item.name == text09);
-
-  if (ui_theme == THEME_PRIDE) {
-    if (isBack) return TFT_DARKGREY;                 // Back always grey, easy to find
-    int total = 0, rank = 0;                         // rank among the non-Back rows
-    for (int i = 0; i < menu->list->size(); i++) {
-      if (menu->list->get(i).name == text09) continue;
-      if (i == absIndex) rank = total;
-      total++;
-    }
-    float h = (total <= 1) ? 0.0f : (280.0f * rank / (total - 1));  // first=red(0) .. last=violet(280)
-    return hsv565(h, 1.0f, 1.0f);
-  }
 
   if (ui_theme == THEME_HACKER) {
     if (isBack) return TFT_DARKGREY;
@@ -3251,52 +3274,10 @@ void MenuFunctions::setTheme(uint8_t t) {
 }
 
 // Draw a small procedural glyph (22x22) in place of the normal menu icon, for
-// the Hacker and Pride themes. rank cycles the set so adjacent rows differ.
+// the Hacker theme. rank cycles the set so adjacent rows differ.
 void MenuFunctions::drawThemeGlyph(int x, int y, int rank, uint16_t color) {
   TFT_eSPI& t = display_obj.tft;
   int cx = x + ICON_W / 2, cy = y + ICON_H / 2;
-
-  if (ui_theme == THEME_PRIDE) {
-    switch (rank % 6) {
-      case 0: {  // pride flag: six ROYGBIV stripes
-        static const uint16_t rc[6] = { TFT_RED, TFT_ORANGE, TFT_YELLOW, TFT_GREEN, TFT_BLUE, TFT_PURPLE };
-        int sh = ICON_H / 6;
-        for (int s = 0; s < 6; s++) t.fillRect(x + 2, y + s * sh, ICON_W - 4, sh, rc[s]);
-        break;
-      }
-      case 1:    // heart
-        t.fillCircle(cx - 3, cy - 2, 3, TFT_RED);
-        t.fillCircle(cx + 3, cy - 2, 3, TFT_RED);
-        t.fillTriangle(cx - 6, cy - 1, cx + 6, cy - 1, cx, cy + 7, TFT_RED);
-        break;
-      case 2:    // peace sign
-        t.drawCircle(cx, cy, 8, TFT_WHITE);
-        t.drawFastVLine(cx, cy - 8, 16, TFT_WHITE);
-        t.drawLine(cx, cy, cx - 6, cy + 6, TFT_WHITE);
-        t.drawLine(cx, cy, cx + 6, cy + 6, TFT_WHITE);
-        break;
-      case 3: {  // transgender-pride stripes (light blue / pink / white)
-        uint16_t ts[5] = { 0x5D1F, 0xFDB8, TFT_WHITE, 0xFDB8, 0x5D1F };
-        int sh = ICON_H / 5;
-        for (int s = 0; s < 5; s++) t.fillRect(x + 2, y + s * sh, ICON_W - 4, sh, ts[s]);
-        break;
-      }
-      case 4:    // figure with a rounded belly
-        t.fillCircle(cx - 2, y + 4, 3, color);
-        t.drawFastVLine(cx - 2, y + 7, 7, color);
-        t.fillCircle(cx + 2, cy + 3, 4, color);
-        t.drawFastVLine(cx - 2, cy + 6, 4, color);
-        break;
-      default: {  // adult-novelty: vertical shaft + two circles at the base
-        uint16_t pc = TFT_PURPLE;
-        t.fillRoundRect(cx - 3, y + 1, 6, 15, 3, pc);   // shaft (rounded-top cylinder)
-        t.fillCircle(cx - 4, y + 17, 3, pc);            // base circle, left
-        t.fillCircle(cx + 4, y + 17, 3, pc);            // base circle, right
-        break;
-      }
-    }
-    return;
-  }
 
   // Hacker glyphs: single-colour line art (the row's hacker colour) on black.
   switch (rank % 6) {
@@ -3339,12 +3320,12 @@ void MenuFunctions::drawThemeGlyph(int x, int y, int rank, uint16_t color) {
 }
 
 // Draw the left-edge icon for a menu item: normal XBitmap in Dark/Light, or a
-// themed procedural glyph in Hacker/Pride. Back rows never get an icon.
+// themed procedural glyph in Hacker. Back rows never get an icon.
 void MenuFunctions::drawItemIcon(Menu* menu, int absIndex, int iconY, uint16_t color) {
   if (!menu || !menu->list || absIndex < 0 || absIndex >= menu->list->size()) return;
   MenuNode item = menu->list->get(absIndex);
   if (item.name == text09) return;
-  if (ui_theme == THEME_HACKER || ui_theme == THEME_PRIDE) {
+  if (ui_theme == THEME_HACKER) {
     int rank = 0;
     for (int i = 0; i < absIndex; i++)
       if (menu->list->get(i).name != text09) rank++;
@@ -3486,30 +3467,24 @@ void MenuFunctions::restampHackerMenu() {
   this->drawScrollArrows();   // keep the ▲▼ crisp over the rain
 }
 
-// Dimmed (~20%) idle screensaver. Hacker = full-screen green rain; Pride = a
-// rainbow backdrop with little "man" figures raining down. Blocks until touch,
-// then restores brightness and repaints the menu. Entered only for those two
-// themes after a stretch of no touch.
+// Dimmed (~20%) idle screensaver. Hacker = full-screen green rain; Light/Dark =
+// plain black with cycling quotes. Blocks until touch, then restores brightness
+// and repaints the menu.
 void MenuFunctions::runScreensaver() {
   TFT_eSPI& t = display_obj.tft;
   int W = t.width(), H = t.height();
-  bool pride = (ui_theme == THEME_PRIDE);
 
   uint8_t saved_bl = backlight_pct;
   backlight_pct = 40;                 // dim while the screensaver runs
   applyBrightness();
 
-  if (pride)                          // paint the rainbow backdrop once
-    for (int y = 0; y < H; y++) t.drawFastHLine(0, y, W, hsv565(300.0f * y / H, 0.9f, 0.45f));
-  else
-    t.fillScreen(TFT_BLACK);
+  t.fillScreen(TFT_BLACK);
 
   bool hacker = (ui_theme == THEME_HACKER);
 
   // Cycling headline (protected band in the vertical centre, redrawn only on
   // change so the animation never flickers it). Theme-specific phrases first,
   // then the universal quotes (shown on every theme).
-  static const char* PRIDE_TXT[] = { "Slay Queen", "Yasss", "Love is Love", "Born this Way", "It's raining men" };
   static const char* HACK_TXT[]  = { "Enter the Matrix", "Zero-Day Exploit", "I'm bypassing the firewall",
                                      "Backlooping through the Mainframe", "Come on, baby, talk to me",
                                      "Now, we wait", "Too Easy" };
@@ -3521,10 +3496,10 @@ void MenuFunctions::runScreensaver() {
     "Lotus-o-delta type stator: A main power coil that helps stop electric feedback.",
     "Capacitive diractance: A fake electronic force that works against regular power resistance.",
     "Malleable logarithmic casing: The strong outer shell designed to hold the gears together." };
-  const char** BASE = pride ? PRIDE_TXT : (hacker ? HACK_TXT : NULL);
-  int nbase = pride ? 5 : (hacker ? 7 : 0);
+  const char** BASE = hacker ? HACK_TXT : NULL;
+  int nbase = hacker ? 7 : 0;
   int ncommon = 7;
-  int NPHR = pride ? nbase : (nbase + ncommon);   // Pride shows only its own phrases (no technobabble)
+  int NPHR = nbase + ncommon;
   int phrase = -1;
   uint32_t lastPhrase = 0;
   bool firstPhrase = true;
@@ -3533,34 +3508,16 @@ void MenuFunctions::runScreensaver() {
   int prevBandY0 = H / 2, prevBandY1 = H / 2;                 // previous band, cleared on change
 
   const int CW = 8, CH = 10, TRAIL = 7;       // hacker rain cells
-  const int MW = 22, MSTEP = 9;               // pride man column width + fall speed (px)
-  int ncols = (pride ? W / MW : W / CW); if (ncols > 64) ncols = 64;
+  int ncols = W / CW; if (ncols > 64) ncols = 64;
   int nrows = H / CH;
-  for (int c = 0; c < ncols; c++) hrain_drop[c] = pride ? -(int)random(0, H) : -(int)random(0, nrows);
+  for (int c = 0; c < ncols; c++) hrain_drop[c] = -(int)random(0, nrows);
 
   static const char* SET = "0123456789ABCDEF#$%&*+<>=/";
   int nch = strlen(SET);
 
   uint16_t tx = 0, ty = 0;
   while (!this->updateTouch(&tx, &ty)) {       // run until touched
-    if (pride) {
-      for (int c = 0; c < ncols; c++) {
-        int x = c * MW, y = hrain_drop[c];
-        for (int yy = y; yy < y + 22 && yy < H; yy++)     // erase old man; leave the headline band alone
-          if (yy >= 0 && (yy < bandY0 || yy >= bandY1)) t.drawFastHLine(x, yy, MW, hsv565(300.0f * yy / H, 0.9f, 0.45f));
-        hrain_drop[c] += MSTEP;
-        if (hrain_drop[c] > H) hrain_drop[c] = -(int)random(0, 80) - 20;
-        int ny = hrain_drop[c];
-        if (ny >= -20 && ny < H && (ny + 22 <= bandY0 || ny >= bandY1)) {   // hide men behind the headline
-          int mcx = x + MW / 2;
-          t.fillCircle(mcx, ny + 4, 3, TFT_WHITE);
-          t.drawFastVLine(mcx, ny + 7, 8, TFT_WHITE);
-          t.drawFastHLine(mcx - 5, ny + 9, 11, TFT_WHITE);
-          t.drawLine(mcx, ny + 15, mcx - 5, ny + 20, TFT_WHITE);
-          t.drawLine(mcx, ny + 15, mcx + 5, ny + 20, TFT_WHITE);
-        }
-      }
-    } else if (hacker) {
+    if (hacker) {
       t.setFreeFont(NULL); t.setTextSize(1); t.setTextDatum(TL_DATUM);
       for (int c = 0; c < ncols; c++) {
         int y = hrain_drop[c], x = c * CW;
@@ -3616,31 +3573,20 @@ void MenuFunctions::runScreensaver() {
       }
 
       // Clear the previous band, compute the new one centred, remember it.
-      if (pride) for (int y = prevBandY0; y < prevBandY1; y++) t.drawFastHLine(0, y, W, hsv565(300.0f * y / H, 0.9f, 0.45f));
-      else       t.fillRect(0, prevBandY0, W, prevBandY1 - prevBandY0, TFT_BLACK);
+      t.fillRect(0, prevBandY0, W, prevBandY1 - prevBandY0, TFT_BLACK);
       int totalH = 0; for (int i = 0; i < nAll; i++) totalH += 8 * lineSize[i] + 4;
       int y0 = bcy - totalH / 2;
       bandY0 = y0 - 2; bandY1 = y0 + totalH + 2;
       prevBandY0 = bandY0; prevBandY1 = bandY1;
 
       t.setFreeFont(NULL); t.setTextDatum(TL_DATUM);
-      int gi = 0, total = strlen(s), ly = y0;
+      int ly = y0;
       for (int i = 0; i < nAll; i++) {
         int sz = lineSize[i], cw = 6 * sz, lh = 8 * sz + 4, llen = strlen(lineText[i]);
         int lx = (W - llen * cw) / 2; if (lx < 0) lx = 0;         // centre-align each line
         t.setTextSize(sz);
-        if (pride) {                                              // per-char rainbow, transparent over backdrop
-          for (int j = 0; j < llen; j++) {
-            char cbuf[2] = { lineText[i][j], 0 };
-            t.setTextColor(hsv565((float)gi / (total > 1 ? total - 1 : 1) * 300.0f, 1.0f, 1.0f));
-            t.drawString(cbuf, lx + j * cw, ly);
-            gi++;
-          }
-          gi++;
-        } else {                                                  // Hacker = green, others = white, on black
-          t.setTextColor(hacker ? 0x07E0 : TFT_WHITE, TFT_BLACK);
-          t.drawString(lineText[i], lx, ly);
-        }
+        t.setTextColor(hacker ? 0x07E0 : TFT_WHITE, TFT_BLACK);   // Hacker = green, others = white, on black
+        t.drawString(lineText[i], lx, ly);
         ly += lh;
       }
     }
@@ -3985,7 +3931,7 @@ void MenuFunctions::displayCurrentMenu(int start_index)
 
         this->drawItemIcon(current_menu, i,
                            KEY_Y + (i - start_index) * (KEY_H + KEY_SPACING_Y) - (ICON_H / 2),
-                           color);   // normal icon, or a Hacker/Pride glyph
+                           color);   // normal icon, or a Hacker glyph
 
         // Repaint the outline over the icon (left) and any overrunning label (right).
         this->redrawButtonBorder(i - start_index, false);

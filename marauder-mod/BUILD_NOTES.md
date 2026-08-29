@@ -13,10 +13,10 @@ checkout (see "Building it" below).
 
 - **Board target:** `CYD_35` — selected via `MARAUDER_V4` in `configs.h` — the
   4″ ST7796 320×480 **resistive** (XPT2046) panel.
-- **A theme engine** (`ui_theme`: Light / Dark / Hacker / Pride) with a
+- **A theme engine** (`ui_theme`: Light / Dark / Hacker) with a
   **Toggle Theme** submenu, persisted to NVS. `itemColor()` / `themeOutline()`
-  drive per-theme menu colors (Pride = HSV rainbow spread; Hacker = neon green),
-  and `drawThemeGlyph()` draws procedural Hacker/Pride icons.
+  drive per-theme menu colors (Hacker = neon green), and `drawThemeGlyph()`
+  draws procedural Hacker icons.
 - **Hacker "Matrix" rain** behind the menus (`stepHackerRain()` /
   `restampHackerMenu()`), plus a **splash** on theme-select and boot
   (`matrixSplash()`).

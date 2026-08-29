@@ -154,7 +154,7 @@ class MenuFunctions
     Menu updateMenu;
     Menu settingsMenu;
     Menu specSettingMenu;
-    Menu themeMenu;                    // "Toggle Theme" library: Light/Dark/Hacker/Pride
+    Menu themeMenu;                    // "Toggle Theme" library: Light/Dark/Hacker
     Menu languageMenu;
     Menu sdDeleteMenu;
 
@@ -193,18 +193,18 @@ class MenuFunctions
     // Menu icons
 
     uint16_t getColor(uint16_t color);
-    uint16_t itemColor(Menu* menu, int absIndex);  // themed text/icon colour for a menu item (Pride rainbow, Hacker greens)
+    uint16_t itemColor(Menu* menu, int absIndex);  // themed text/icon colour for a menu item (Hacker greens)
     uint16_t themeOutline();                        // button-outline colour for the active theme
     void     setTheme(uint8_t t);                   // apply + persist a theme, redraw live
-    void     drawItemIcon(Menu* menu, int absIndex, int iconY, uint16_t color);  // normal icon, or a themed glyph in Hacker/Pride
-    void     drawThemeGlyph(int x, int y, int rank, uint16_t color);             // procedural Hacker/Pride glyph
+    void     drawItemIcon(Menu* menu, int absIndex, int iconY, uint16_t color);  // normal icon, or a themed glyph in Hacker
+    void     drawThemeGlyph(int x, int y, int rank, uint16_t color);             // procedural Hacker glyph
     void     matrixSplash(uint32_t duration_ms);                                 // full-screen "digital rain" (Hacker)
     void     stepHackerRain();          // one live rain frame behind the menu + re-stamp (Hacker see-through)
     void     restampHackerMenu();       // redraw outlines/labels/glyphs on top of the rain (no fill)
     int      hrain_drop[64];            // per-column rain head row
     uint32_t hrain_tick = 0;
     uint32_t last_activity_ms = 0;      // last touch time, for the idle screensaver
-    void     runScreensaver();          // dimmed idle animation (Hacker rain / Pride raining-men)
+    void     runScreensaver();          // dimmed idle animation (Hacker rain / cycling quotes)
     void drawAvgLine(int16_t value);
     void drawMaxLine(int16_t value, uint16_t color);
     float calculateGraphScale(int16_t value);
@@ -215,6 +215,7 @@ class MenuFunctions
     void addNodes(Menu* menu, String name, uint8_t color, Menu* child, int place, std::function<void()> callable, bool selected = false, String command = "");
     void battery(bool initial = false);
     void battery2(bool initial = false);
+    void batteryCYD(bool initial = false);   // clean GPIO34-only readout for the 4" CYD, drawn right of the SD icon
     void showMenuList(Menu* menu, int layer);
     String callSetting(String key);
     void runBoolSetting(String ley);
