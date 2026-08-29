@@ -43,6 +43,12 @@
 #define PIN_LED_G     16
 #define PIN_LED_B     17
 
+// ---------- microSD card (shared VSPI bus: SCK 18 / MISO 19 / MOSI 23) ----------
+// The SD slot is on the ESP32's default (VSPI) SPI bus, separate from the
+// display (which LovyanGFX drives on HSPI 12/13/14), so the two don't collide.
+// Only the chip-select differs per board; on this 4" CYD it's GPIO 5.
+#define PIN_SD_CS  5
+
 // ---------- Battery gauge (18650 on the CYD's onboard battery JST) ----------
 // The battery connector feeds this pin through an on-board resistor divider.
 // GPIO 34 is ADC1 + input-only, so it reads correctly even while Marauder's

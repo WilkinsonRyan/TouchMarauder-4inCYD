@@ -16,6 +16,7 @@
 #include <Arduino.h>
 #include <ctype.h>
 #include <Preferences.h>     // persist theme + brightness in NVS
+#include <SD.h>              // Books reader: read .txt files from the microSD card
 #include "ui.h"
 #include "config.h"
 #include "display.h"
@@ -170,6 +171,12 @@ static bool homeOpen     = false;
 static int  homeDownTile = -1;
 static const int HOME_BTN_W = 36;   // tap zone at the strip's left edge
 
+// Books reader mode (a launcher app): NONE = not in Books, LIST = pick a book,
+// READ = reading one. Declared here so drawStrip() can suppress its keyboard
+// text while the reader is up.
+enum { BM_NONE = 0, BM_LIST, BM_READ };
+static uint8_t booksMode = BM_NONE;
+
 static uint32_t ss_last_activity = 0;   // idle-screensaver timer (declared early: used in ui_onTouchDown)
 static int      ss_drop[64];
 
@@ -308,7 +315,7 @@ static void drawStrip() {
   tft.fillCircle(46, scy, 5, conn ? COL_OK : COL_ADV);   // conn dot, shifted right of Home
   int battLeft = drawBatteryGlyph();   // right-aligned; other strip text stays left of this
 
-  if (homeOpen) return;   // on the launcher, the strip is just Home + battery
+  if (homeOpen || booksMode != BM_NONE) return;   // launcher/Books: strip is just Home + battery
 
   tft.setTextDatum(textdatum_t::middle_left);
   tft.setFont(&fonts::FreeSans9pt7b);
@@ -757,11 +764,11 @@ static void qwertyTouchUp() {
 // ---------------- full redraw ----------------
 // ---------------- Home launcher screen ----------------
 struct HomeTile { const char* label; uint8_t act; bool ready; };
-enum { HACT_KB = 0, HACT_MARAUDER, HACT_SOON };
+enum { HACT_KB = 0, HACT_MARAUDER, HACT_BOOKS, HACT_SOON };
 static const HomeTile HOME_TILES[] = {
   { "Keyboard",   HACT_KB,       true  },
   { "Marauder",   HACT_MARAUDER, true  },
-  { "Books",      HACT_SOON,     false },
+  { "Books",      HACT_BOOKS,    true  },
   { "Soundboard", HACT_SOON,     false },
   { "MIDI",       HACT_SOON,     false },
 };
@@ -818,8 +825,235 @@ static void drawHome() {
   for (int i = 0; i < HOME_N; i++) drawHomeTile(i, false);
 }
 
+// ================= Books reader =================
+// Reads plain-text (.txt) books from the SD card's /Books folder. Word-wraps on
+// the fly and turns a page at a time (feels like scrolling); remembers your
+// place per book. The card is on VSPI, independent of the LovyanGFX display.
+static bool     sdInited = false, sdOk = false;
+static String   bookNames[24];
+static int      bookCount = 0;
+static String   curBook;
+static long     curTop = 0, curNext = -1;
+static long     pageStack[160]; static int pageSP = 0;
+static const int BOOK_BAR_H = 40;
+static int      bkDownX = 0, bkDownY = 0;
+
+static bool sdReady() {
+  if (!sdInited) {                       // lazy one-time init
+    sdInited = true;
+    sdOk = SD.begin(PIN_SD_CS);
+    if (sdOk && !SD.exists("/Books")) SD.mkdir("/Books");   // auto-create the folder
+  }
+  return sdOk;
+}
+
+static uint32_t fnv1a(const String& s) {
+  uint32_t h = 2166136261u;
+  for (size_t i = 0; i < s.length(); i++) { h ^= (uint8_t)s[i]; h *= 16777619u; }
+  return h;
+}
+static String bmKey(const String& name) {   // NVS keys max 15 chars -> hash the filename
+  char k[9]; snprintf(k, sizeof k, "%08x", (unsigned)fnv1a(name)); return String(k);
+}
+static void bmSave(long off) {
+  Preferences bp; bp.begin("books", false); bp.putULong(bmKey(curBook).c_str(), (uint32_t)off); bp.end();
+}
+static long bmLoad(const String& name) {
+  Preferences bp; bp.begin("books", true); long v = (long)bp.getULong(bmKey(name).c_str(), 0); bp.end(); return v;
+}
+
+// Lay out one screen of text from byte offset `start`; optionally draw it.
+// Returns the byte offset where the next page begins, or -1 at end of file.
+static long booksRenderPage(File& f, long start, bool draw) {
+  f.seek(start);
+  tft.setFont(&fonts::FreeSans9pt7b);
+  tft.setTextDatum(textdatum_t::top_left);
+  if (draw) tft.setTextColor(COL_TEXT, COL_BG);
+  const int textW = SCREEN_W - 16;
+  const int lineH = 20;
+  const int topY  = AREA_Y + 4;
+  const int botY  = SCREEN_H - BOOK_BAR_H - 2;
+  const int maxLines = (botY - topY) / lineH;
+  int lines = 0;
+  String line = "", word = "";
+  long pos = start, wordStart = start;
+  auto emit = [&]() { if (draw) tft.drawString(line, 8, topY + lines * lineH); lines++; line = ""; };
+
+  while (lines < maxLines) {
+    int c = f.read();
+    if (c < 0) {                                   // end of file: flush remainder
+      if (word.length()) {
+        if (line.length() == 0) line = word;
+        else if (tft.textWidth(line + " " + word) <= textW) line += " " + word;
+        else { emit(); if (lines >= maxLines) return wordStart; line = word; }
+      }
+      if (line.length()) emit();
+      return -1;
+    }
+    pos++;
+    char ch = (char)c;
+    if (ch == '\r') continue;
+    if (ch == ' ' || ch == '\n') {
+      if (word.length()) {
+        if (line.length() == 0) line = word;
+        else if (tft.textWidth(line + " " + word) <= textW) line += " " + word;
+        else { emit(); if (lines >= maxLines) return wordStart; line = word; }
+        word = "";
+      }
+      if (ch == '\n') { emit(); if (lines >= maxLines) return pos; }
+      wordStart = pos;
+    } else {
+      if (word.length() == 0) wordStart = pos - 1;
+      word += ch;
+    }
+  }
+  return pos;
+}
+
+static void booksDrawBar() {
+  int by = SCREEN_H - BOOK_BAR_H;
+  const char* labels[4] = { "< Prev", "Mark", "List", "Next >" };
+  int bw = SCREEN_W / 4;
+  tft.setTextDatum(textdatum_t::middle_center);
+  tft.setFont(&fonts::FreeSans9pt7b);
+  for (int i = 0; i < 4; i++) {
+    int x = i * bw;
+    tft.fillRect(x, by, bw - 1, BOOK_BAR_H, COL_KEY_SPEC);
+    keyOutlineRect(x, by, bw - 1, BOOK_BAR_H, 4);
+    tft.setTextColor(COL_TEXT, COL_KEY_SPEC);
+    tft.drawString(labels[i], x + bw / 2, by + BOOK_BAR_H / 2);
+  }
+}
+
+static void booksHeader(const String& title) {
+  tft.fillRect(0, 0, SCREEN_W, TAB_H, COL_TAB);
+  tft.setTextDatum(textdatum_t::middle_center);
+  tft.setFont(&fonts::FreeSansBold12pt7b);
+  tft.setTextColor(COL_TAB_ON, COL_TAB);
+  String t = title; if (t.length() > 24) t = t.substring(0, 23) + "…";
+  tft.drawString(t, SCREEN_W / 2, TAB_H / 2);
+}
+
+// Render the current page of the current book (chrome + text + save place).
+static void booksShowPage(long off) {
+  curTop = off;
+  tft.setRotation(0);
+  tft.fillScreen(COL_BG);
+  String title = curBook; if (title.endsWith(".txt")) title = title.substring(0, title.length() - 4);
+  booksHeader(title);
+  drawStrip();                                     // Home + battery
+  File f = SD.open(("/Books/" + curBook).c_str());
+  if (!f) {
+    tft.setFont(&fonts::FreeSans9pt7b); tft.setTextColor(COL_TEXT, COL_BG);
+    tft.setTextDatum(textdatum_t::top_left);
+    tft.drawString("Could not open this book.", 8, AREA_Y + 8);
+    curNext = -1;
+  } else {
+    curNext = booksRenderPage(f, off, true);
+    f.close();
+  }
+  booksDrawBar();
+  bmSave(off);                                      // remember where we are
+}
+
+static void booksDrawList() {
+  booksMode = BM_LIST;
+  tft.setRotation(0);
+  tft.fillScreen(COL_BG);
+  booksHeader("Books");
+  drawStrip();
+  tft.setTextDatum(textdatum_t::top_left);
+  tft.setTextColor(COL_TEXT, COL_BG);
+  if (!sdReady()) {
+    tft.setFont(&fonts::FreeSans9pt7b);
+    tft.drawString("SD card not found.", 8, AREA_Y + 10);
+    return;
+  }
+  // (re)scan /Books for .txt files
+  bookCount = 0;
+  File dir = SD.open("/Books");
+  if (dir && dir.isDirectory()) {
+    File e;
+    while ((e = dir.openNextFile()) && bookCount < 24) {
+      String n = e.name(); int sl = n.lastIndexOf('/'); if (sl >= 0) n = n.substring(sl + 1);
+      if (n.endsWith(".txt") || n.endsWith(".TXT")) bookNames[bookCount++] = n;
+      e.close();
+    }
+    dir.close();
+  }
+  if (bookCount == 0) {
+    tft.setFont(&fonts::FreeSans9pt7b);
+    tft.drawString("No books yet.", 8, AREA_Y + 10);
+    tft.drawString("Put .txt files in the", 8, AREA_Y + 34);
+    tft.drawString("Books folder on the SD card.", 8, AREA_Y + 54);
+    return;
+  }
+  const int rowH = 42; int y = AREA_Y + 6;
+  int maxRows = (SCREEN_H - y - 6) / rowH;
+  tft.setFont(&fonts::FreeSans9pt7b);
+  for (int i = 0; i < bookCount && i < maxRows; i++) {
+    tft.fillRoundRect(6, y, SCREEN_W - 12, rowH - 6, 6, COL_KEY_SPEC);
+    keyOutlineRect(6, y, SCREEN_W - 12, rowH - 6, 6);
+    String n = bookNames[i]; if (n.endsWith(".txt")) n = n.substring(0, n.length() - 4);
+    if (n.length() > 30) n = n.substring(0, 29) + "…";
+    tft.setTextDatum(textdatum_t::middle_left);
+    tft.setTextColor(COL_TEXT, COL_KEY_SPEC);
+    tft.drawString(n, 16, y + (rowH - 6) / 2);
+    y += rowH;
+  }
+}
+
+static void booksOpen(const String& name) {
+  curBook = name;
+  pageSP = 0;
+  booksMode = BM_READ;
+  booksShowPage(bmLoad(name));                      // resume where we left off
+}
+
+static void booksEnter() { curView = VIEW_KB; booksMode = BM_LIST; sdReady(); booksDrawList(); }
+
+static void booksNext() {
+  if (curNext >= 0) { if (pageSP < 160) pageStack[pageSP++] = curTop; booksShowPage(curNext); }
+}
+static void booksPrev() {
+  if (pageSP > 0) booksShowPage(pageStack[--pageSP]);
+}
+
+static void booksTouchDown(int x, int y) { bkDownX = x; bkDownY = y; }
+
+static void booksTouchUp() {
+  int by = SCREEN_H - BOOK_BAR_H;
+  if (booksMode == BM_LIST) {
+    // tap a book row
+    const int rowH = 42; int y0 = AREA_Y + 6;
+    if (bkDownY >= y0) {
+      int idx = (bkDownY - y0) / rowH;
+      if (idx >= 0 && idx < bookCount) booksOpen(bookNames[idx]);
+    }
+    return;
+  }
+  // READ mode
+  if (bkDownY >= by) {                              // bottom bar
+    int bw = SCREEN_W / 4, i = bkDownX / bw;
+    if      (i == 0) booksPrev();
+    else if (i == 1) { bmSave(curTop); /* flash */ tft.fillRect(bw, by, bw - 1, BOOK_BAR_H, COL_KEY_DOWN);
+                       tft.setTextDatum(textdatum_t::middle_center); tft.setFont(&fonts::FreeSans9pt7b);
+                       tft.setTextColor(COL_TEXT, COL_KEY_DOWN); tft.drawString("Saved", bw + bw / 2, by + BOOK_BAR_H / 2); }
+    else if (i == 2) booksDrawList();
+    else             booksNext();
+    return;
+  }
+  // reading area: tap the right side to go forward, the left side to go back
+  if (bkDownY >= AREA_Y) {
+    if (bkDownX > SCREEN_W / 2) booksNext();
+    else                        booksPrev();
+  }
+}
+
 static void drawView() {
   if (homeOpen) { drawHome(); return; }
+  if (booksMode == BM_LIST) { booksDrawList(); return; }
+  if (booksMode == BM_READ) { booksShowPage(curTop); return; }
   if (curView == VIEW_QWERTY) { tft.setRotation(3); drawQwerty(); return; }  // landscape (flipped)
   tft.setRotation(0);          // every other screen is portrait (flipped 180° to match Marauder)
   drawTabs();
@@ -848,6 +1082,7 @@ void ui_onTouchDown(int tx, int ty) {
 
   // Home button (left of the strip) toggles the launcher, from any portrait view.
   if (tx < HOME_BTN_W && ty >= STRIP_Y && ty < STRIP_Y + STRIP_H) {
+    booksMode = BM_NONE;                 // leaving Books if we were in it
     homeOpen = !homeOpen;
     drawView();
     return;
@@ -857,6 +1092,7 @@ void ui_onTouchDown(int tx, int ty) {
     if (homeDownTile >= 0) drawHomeTile(homeDownTile, true);
     return;
   }
+  if (booksMode != BM_NONE) { booksTouchDown(tx, ty); return; }
 
   down = { nullptr, 0, 0, 0, 0, -1, false };
 
@@ -915,10 +1151,12 @@ void ui_onTouchUp() {
     switch (HOME_TILES[i].act) {
       case HACT_KB:       homeOpen = false; curView = VIEW_KB; drawView(); break;
       case HACT_MARAUDER: switchToApp(ESP_PARTITION_SUBTYPE_APP_OTA_0, "Marauder"); break;
+      case HACT_BOOKS:    homeOpen = false; booksEnter(); break;
       default:            drawHomeTile(i, false); break;
     }
     return;
   }
+  if (booksMode != BM_NONE) { booksTouchUp(); return; }
 
   if (curView == VIEW_KB && !down.valid) { t9TouchUp(); return; }
   if (!down.valid) return;
@@ -1217,7 +1455,7 @@ void ui_tick(uint32_t now) {
     lastConn = conn;
     lastBonds = bonds;
     if (curView != VIEW_QWERTY) drawStrip();   // strip is portrait-only
-    if (!homeOpen && curView == VIEW_BT && btScreen == BTS_INFO) drawBTView();  // don't clobber settings/theme/home screens
+    if (!homeOpen && booksMode == BM_NONE && curView == VIEW_BT && btScreen == BTS_INFO) drawBTView();  // don't clobber other screens
   }
 
   // Battery: sample slowly, and only touch the screen / BLE when the % actually
