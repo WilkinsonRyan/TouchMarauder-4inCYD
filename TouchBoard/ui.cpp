@@ -174,7 +174,7 @@ static const int HOME_BTN_W = 36;   // tap zone at the strip's left edge
 // Books reader mode (a launcher app): NONE = not in Books, LIST = pick a book,
 // READ = reading one. Declared here so drawStrip() can suppress its keyboard
 // text while the reader is up.
-enum { BM_NONE = 0, BM_LIST, BM_READ };
+enum { BM_NONE = 0, BM_AUTHORS, BM_LIBRARY, BM_READ };
 static uint8_t booksMode = BM_NONE;
 
 static uint32_t ss_last_activity = 0;   // idle-screensaver timer (declared early: used in ui_onTouchDown)
@@ -826,24 +826,27 @@ static void drawHome() {
 }
 
 // ================= Books reader =================
-// Reads plain-text (.txt) books from the SD card's /Books folder. Word-wraps on
-// the fly and turns a page at a time (feels like scrolling); remembers your
-// place per book. The card is on VSPI, independent of the LovyanGFX display.
+// Library layout on the SD card:  /Books/<Author>/<Book Title>/ containing a
+// .txt (the book) and an image (the cover: .jpg/.png/.bmp). Three screens:
+// Authors -> that author's books (cover grid) -> the reader (page at a time).
+// Reading place is remembered per book. SD is on VSPI, separate from the display.
 static bool     sdInited = false, sdOk = false;
-static String   bookNames[24];
-static int      bookCount = 0;
-static String   curBook;
+static const int BOOK_BAR_H = 40;
+
+// Authors level
+static String   authorNames[32]; static int authorCount = 0;
+static String   curAuthor;
+// Library level (books for the current author)
+static String   libTitle[40], libTxt[40], libCover[40]; static int libCount = 0;
+// Reader level
+static String   curBook;                 // full path to the open .txt
 static long     curTop = 0, curNext = -1;
 static long     pageStack[160]; static int pageSP = 0;
-static const int BOOK_BAR_H = 40;
 static int      bkDownX = 0, bkDownY = 0;
 
 static bool sdReady() {
-  if (!sdInited) {                       // lazy one-time init
-    sdInited = true;
-    sdOk = SD.begin(PIN_SD_CS);
-    if (sdOk && !SD.exists("/Books")) SD.mkdir("/Books");   // auto-create the folder
-  }
+  if (!sdInited) { sdInited = true; sdOk = SD.begin(PIN_SD_CS);
+                   if (sdOk && !SD.exists("/Books")) SD.mkdir("/Books"); }
   return sdOk;
 }
 
@@ -852,36 +855,23 @@ static uint32_t fnv1a(const String& s) {
   for (size_t i = 0; i < s.length(); i++) { h ^= (uint8_t)s[i]; h *= 16777619u; }
   return h;
 }
-static String bmKey(const String& name) {   // NVS keys max 15 chars -> hash the filename
-  char k[9]; snprintf(k, sizeof k, "%08x", (unsigned)fnv1a(name)); return String(k);
-}
-static void bmSave(long off) {
-  Preferences bp; bp.begin("books", false); bp.putULong(bmKey(curBook).c_str(), (uint32_t)off); bp.end();
-}
-static long bmLoad(const String& name) {
-  Preferences bp; bp.begin("books", true); long v = (long)bp.getULong(bmKey(name).c_str(), 0); bp.end(); return v;
-}
+static String bmKey(const String& path) { char k[9]; snprintf(k, sizeof k, "%08x", (unsigned)fnv1a(path)); return String(k); }
+static void   bmSave(long off) { Preferences bp; bp.begin("books", false); bp.putULong(bmKey(curBook).c_str(), (uint32_t)off); bp.end(); }
+static long   bmLoad(const String& path) { Preferences bp; bp.begin("books", true); long v = (long)bp.getULong(bmKey(path).c_str(), 0); bp.end(); return v; }
 
-// Lay out one screen of text from byte offset `start`; optionally draw it.
-// Returns the byte offset where the next page begins, or -1 at end of file.
+// ---- text page layout (word-wrap; returns byte offset of the next page, or -1 at EOF) ----
 static long booksRenderPage(File& f, long start, bool draw) {
   f.seek(start);
   tft.setFont(&fonts::FreeSans9pt7b);
   tft.setTextDatum(textdatum_t::top_left);
   if (draw) tft.setTextColor(COL_TEXT, COL_BG);
-  const int textW = SCREEN_W - 16;
-  const int lineH = 20;
-  const int topY  = AREA_Y + 4;
-  const int botY  = SCREEN_H - BOOK_BAR_H - 2;
+  const int textW = SCREEN_W - 16, lineH = 20, topY = AREA_Y + 4, botY = SCREEN_H - BOOK_BAR_H - 2;
   const int maxLines = (botY - topY) / lineH;
-  int lines = 0;
-  String line = "", word = "";
-  long pos = start, wordStart = start;
+  int lines = 0; String line = "", word = ""; long pos = start, wordStart = start;
   auto emit = [&]() { if (draw) tft.drawString(line, 8, topY + lines * lineH); lines++; line = ""; };
-
   while (lines < maxLines) {
     int c = f.read();
-    if (c < 0) {                                   // end of file: flush remainder
+    if (c < 0) {
       if (word.length()) {
         if (line.length() == 0) line = word;
         else if (tft.textWidth(line + " " + word) <= textW) line += " " + word;
@@ -890,8 +880,7 @@ static long booksRenderPage(File& f, long start, bool draw) {
       if (line.length()) emit();
       return -1;
     }
-    pos++;
-    char ch = (char)c;
+    pos++; char ch = (char)c;
     if (ch == '\r') continue;
     if (ch == ' ' || ch == '\n') {
       if (word.length()) {
@@ -902,27 +891,9 @@ static long booksRenderPage(File& f, long start, bool draw) {
       }
       if (ch == '\n') { emit(); if (lines >= maxLines) return pos; }
       wordStart = pos;
-    } else {
-      if (word.length() == 0) wordStart = pos - 1;
-      word += ch;
-    }
+    } else { if (word.length() == 0) wordStart = pos - 1; word += ch; }
   }
   return pos;
-}
-
-static void booksDrawBar() {
-  int by = SCREEN_H - BOOK_BAR_H;
-  const char* labels[4] = { "< Prev", "Mark", "List", "Next >" };
-  int bw = SCREEN_W / 4;
-  tft.setTextDatum(textdatum_t::middle_center);
-  tft.setFont(&fonts::FreeSans9pt7b);
-  for (int i = 0; i < 4; i++) {
-    int x = i * bw;
-    tft.fillRect(x, by, bw - 1, BOOK_BAR_H, COL_KEY_SPEC);
-    keyOutlineRect(x, by, bw - 1, BOOK_BAR_H, 4);
-    tft.setTextColor(COL_TEXT, COL_KEY_SPEC);
-    tft.drawString(labels[i], x + bw / 2, by + BOOK_BAR_H / 2);
-  }
 }
 
 static void booksHeader(const String& title) {
@@ -934,126 +905,193 @@ static void booksHeader(const String& title) {
   tft.drawString(t, SCREEN_W / 2, TAB_H / 2);
 }
 
-// Render the current page of the current book (chrome + text + save place).
-static void booksShowPage(long off) {
-  curTop = off;
-  tft.setRotation(0);
-  tft.fillScreen(COL_BG);
-  String title = curBook; if (title.endsWith(".txt")) title = title.substring(0, title.length() - 4);
-  booksHeader(title);
-  drawStrip();                                     // Home + battery
-  File f = SD.open(("/Books/" + curBook).c_str());
-  if (!f) {
-    tft.setFont(&fonts::FreeSans9pt7b); tft.setTextColor(COL_TEXT, COL_BG);
-    tft.setTextDatum(textdatum_t::top_left);
-    tft.drawString("Could not open this book.", 8, AREA_Y + 8);
-    curNext = -1;
-  } else {
-    curNext = booksRenderPage(f, off, true);
-    f.close();
-  }
-  booksDrawBar();
-  bmSave(off);                                      // remember where we are
+static void booksDrawBar() {
+  int by = SCREEN_H - BOOK_BAR_H; const char* labels[4] = { "< Prev", "Mark", "List", "Next >" };
+  int bw = SCREEN_W / 4;
+  tft.setTextDatum(textdatum_t::middle_center); tft.setFont(&fonts::FreeSans9pt7b);
+  for (int i = 0; i < 4; i++) { int x = i * bw;
+    tft.fillRect(x, by, bw - 1, BOOK_BAR_H, COL_KEY_SPEC); keyOutlineRect(x, by, bw - 1, BOOK_BAR_H, 4);
+    tft.setTextColor(COL_TEXT, COL_KEY_SPEC); tft.drawString(labels[i], x + bw / 2, by + BOOK_BAR_H / 2); }
 }
 
-static void booksDrawList() {
-  booksMode = BM_LIST;
-  tft.setRotation(0);
-  tft.fillScreen(COL_BG);
-  booksHeader("Books");
-  drawStrip();
-  tft.setTextDatum(textdatum_t::top_left);
-  tft.setTextColor(COL_TEXT, COL_BG);
-  if (!sdReady()) {
-    tft.setFont(&fonts::FreeSans9pt7b);
-    tft.drawString("SD card not found.", 8, AREA_Y + 10);
-    return;
-  }
-  // (re)scan /Books for .txt files
-  bookCount = 0;
-  File dir = SD.open("/Books");
-  if (dir && dir.isDirectory()) {
-    File e;
-    while ((e = dir.openNextFile()) && bookCount < 24) {
-      String n = e.name(); int sl = n.lastIndexOf('/'); if (sl >= 0) n = n.substring(sl + 1);
-      if (n.endsWith(".txt") || n.endsWith(".TXT")) bookNames[bookCount++] = n;
-      e.close();
+// ---- cover images: sniff dimensions so we can scale-to-fit without upscaling ----
+static bool imgSize(const String& path, int& w, int& h) {
+  File f = SD.open(path.c_str()); if (!f) return false;
+  uint8_t b[26]; int n = f.read(b, 26); bool ok = false;
+  if (n >= 24 && b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') {           // PNG IHDR
+    w = (b[16] << 24) | (b[17] << 16) | (b[18] << 8) | b[19];
+    h = (b[20] << 24) | (b[21] << 16) | (b[22] << 8) | b[23]; ok = true;
+  } else if (n >= 2 && b[0] == 0xFF && b[1] == 0xD8) {                                   // JPEG SOF
+    f.seek(2);
+    while (f.available()) {
+      if (f.read() != 0xFF) continue;
+      int m = f.read(); if (m < 0) break;
+      if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) {
+        f.read(); f.read(); f.read();
+        h = (f.read() << 8); h |= f.read(); w = (f.read() << 8); w |= f.read(); ok = true; break;
+      } else { int len = (f.read() << 8); len |= f.read(); if (len < 2) break; f.seek(f.position() + len - 2); }
     }
-    dir.close();
+  } else if (n >= 26 && b[0] == 'B' && b[1] == 'M') {                                    // BMP
+    w = b[18] | (b[19] << 8) | (b[20] << 16) | (b[21] << 24);
+    h = b[22] | (b[23] << 8) | (b[24] << 16) | (b[25] << 24); ok = true;
   }
-  if (bookCount == 0) {
-    tft.setFont(&fonts::FreeSans9pt7b);
-    tft.drawString("No books yet.", 8, AREA_Y + 10);
-    tft.drawString("Put .txt files in the", 8, AREA_Y + 34);
-    tft.drawString("Books folder on the SD card.", 8, AREA_Y + 54);
+  f.close(); return ok;
+}
+
+static void drawCover(const String& path, int x, int y, int boxW, int boxH) {
+  int w = 0, h = 0;
+  bool sized = path.length() && imgSize(path, w, h) && w > 0 && h > 0;
+  if (sized) {
+    float s = (float)boxW / w; float sy = (float)boxH / h; if (sy < s) s = sy; if (s > 1.0f) s = 1.0f;
+    int dw = (int)(w * s), dh = (int)(h * s), dx = x + (boxW - dw) / 2, dy = y + (boxH - dh) / 2;
+    String lp = path; lp.toLowerCase();
+    if      (lp.endsWith(".jpg") || lp.endsWith(".jpeg")) { tft.drawJpgFile(SD, path.c_str(), dx, dy, 0, 0, 0, 0, s, s); return; }
+    else if (lp.endsWith(".png"))                          { tft.drawPngFile(SD, path.c_str(), dx, dy, 0, 0, 0, 0, s, s); return; }
+    else if (lp.endsWith(".bmp"))                          { tft.drawBmpFile(SD, path.c_str(), dx, dy); return; }
+  }
+  // fallback: a plain book spine
+  tft.fillRoundRect(x, y, boxW, boxH, 6, COL_KEY);
+  keyOutlineRect(x, y, boxW, boxH, 6);
+}
+
+// ---- Authors screen ----
+static void booksDrawAuthors() {
+  booksMode = BM_AUTHORS; curView = VIEW_KB; tft.setRotation(0);
+  tft.fillScreen(COL_BG); booksHeader("Books"); drawStrip();
+  tft.setTextDatum(textdatum_t::top_left); tft.setTextColor(COL_TEXT, COL_BG); tft.setFont(&fonts::FreeSans9pt7b);
+  if (!sdReady()) { tft.drawString("SD card not found.", 8, AREA_Y + 10); return; }
+  authorCount = 0;
+  File dir = SD.open("/Books");
+  if (dir && dir.isDirectory()) { File e;
+    while ((e = dir.openNextFile()) && authorCount < 32) {
+      if (e.isDirectory()) { String n = e.name(); int sl = n.lastIndexOf('/'); if (sl >= 0) n = n.substring(sl + 1);
+                             if (n.length() && n[0] != '.') authorNames[authorCount++] = n; }
+      e.close(); }
+    dir.close(); }
+  if (authorCount == 0) {
+    tft.drawString("No authors yet.", 8, AREA_Y + 10);
+    tft.drawString("On the SD card, make:", 8, AREA_Y + 34);
+    tft.drawString("Books / Author / Title /", 8, AREA_Y + 54);
+    tft.drawString("with a .txt + cover image.", 8, AREA_Y + 74);
     return;
   }
-  const int rowH = 42; int y = AREA_Y + 6;
-  int maxRows = (SCREEN_H - y - 6) / rowH;
-  tft.setFont(&fonts::FreeSans9pt7b);
-  for (int i = 0; i < bookCount && i < maxRows; i++) {
-    tft.fillRoundRect(6, y, SCREEN_W - 12, rowH - 6, 6, COL_KEY_SPEC);
-    keyOutlineRect(6, y, SCREEN_W - 12, rowH - 6, 6);
-    String n = bookNames[i]; if (n.endsWith(".txt")) n = n.substring(0, n.length() - 4);
-    if (n.length() > 30) n = n.substring(0, 29) + "…";
-    tft.setTextDatum(textdatum_t::middle_left);
-    tft.setTextColor(COL_TEXT, COL_KEY_SPEC);
-    tft.drawString(n, 16, y + (rowH - 6) / 2);
-    y += rowH;
+  const int rowH = 42; int y = AREA_Y + 6; int maxRows = (SCREEN_H - y - 6) / rowH;
+  for (int i = 0; i < authorCount && i < maxRows; i++) {
+    tft.fillRoundRect(6, y, SCREEN_W - 12, rowH - 6, 6, COL_KEY_SPEC); keyOutlineRect(6, y, SCREEN_W - 12, rowH - 6, 6);
+    String n = authorNames[i]; if (n.length() > 30) n = n.substring(0, 29) + "…";
+    tft.setTextDatum(textdatum_t::middle_left); tft.setTextColor(COL_TEXT, COL_KEY_SPEC);
+    tft.drawString(n, 16, y + (rowH - 6) / 2); y += rowH;
   }
 }
 
-static void booksOpen(const String& name) {
-  curBook = name;
-  pageSP = 0;
-  booksMode = BM_READ;
-  booksShowPage(bmLoad(name));                      // resume where we left off
+// ---- Library (cover grid for the current author) ----
+static void booksScanLibrary() {
+  libCount = 0;
+  String base = "/Books/" + curAuthor;
+  File dir = SD.open(base.c_str());
+  if (dir && dir.isDirectory()) { File e;
+    while ((e = dir.openNextFile()) && libCount < 40) {
+      if (e.isDirectory()) {
+        String bn = e.name(); int sl = bn.lastIndexOf('/'); if (sl >= 0) bn = bn.substring(sl + 1);
+        if (bn.length() && bn[0] != '.') {
+          String bdir = base + "/" + bn, txt = "", cov = "";
+          File bd = SD.open(bdir.c_str());
+          if (bd && bd.isDirectory()) { File g;
+            while ((g = bd.openNextFile())) {
+              String fn = g.name(); int s2 = fn.lastIndexOf('/'); if (s2 >= 0) fn = fn.substring(s2 + 1);
+              String low = fn; low.toLowerCase();
+              if (low.endsWith(".txt")) txt = bdir + "/" + fn;
+              else if (low.endsWith(".jpg") || low.endsWith(".jpeg") || low.endsWith(".png") || low.endsWith(".bmp")) cov = bdir + "/" + fn;
+              g.close(); }
+            bd.close(); }
+          if (txt.length()) { libTitle[libCount] = bn; libTxt[libCount] = txt; libCover[libCount] = cov; libCount++; }
+        }
+      }
+      e.close(); }
+    dir.close(); }
 }
 
-static void booksEnter() { curView = VIEW_KB; booksMode = BM_LIST; sdReady(); booksDrawList(); }
+static const int LIB_COLS = 2;
+static void libCellRect(int i, int& x, int& y, int& w, int& h) {
+  int gridTop = AREA_Y + 6, cellW = SCREEN_W / LIB_COLS, cellH = 190;
+  int r = i / LIB_COLS, c = i % LIB_COLS;
+  x = c * cellW + 6; y = gridTop + r * cellH; w = cellW - 12; h = cellH - 10;
+}
 
-static void booksNext() {
-  if (curNext >= 0) { if (pageSP < 160) pageStack[pageSP++] = curTop; booksShowPage(curNext); }
+static void booksDrawLibrary() {
+  booksMode = BM_LIBRARY; curView = VIEW_KB; tft.setRotation(0);
+  tft.fillScreen(COL_BG); booksHeader(curAuthor); drawStrip();
+  tft.setTextColor(COL_TEXT, COL_BG); tft.setTextDatum(textdatum_t::top_left); tft.setFont(&fonts::FreeSans9pt7b);
+  if (libCount == 0) { tft.drawString("No books for this author.", 8, AREA_Y + 10); }
+  int gridTop = AREA_Y + 6, cellH = 190; int maxRows = (SCREEN_H - BOOK_BAR_H - gridTop) / cellH; int maxCells = maxRows * LIB_COLS;
+  for (int i = 0; i < libCount && i < maxCells; i++) {
+    int x, y, w, h; libCellRect(i, x, y, w, h);
+    int coverH = h - 34;
+    drawCover(libCover[i], x, y, w, coverH);
+    String t = libTitle[i]; tft.setFont(&fonts::FreeSans9pt7b); tft.setTextDatum(textdatum_t::top_center);
+    tft.setTextColor(COL_TEXT, COL_BG);
+    if (t.length() > 18) t = t.substring(0, 17) + "…";
+    tft.drawString(t, x + w / 2, y + coverH + 4);
+  }
+  // bottom bar: back to Authors
+  int by = SCREEN_H - BOOK_BAR_H;
+  tft.fillRect(0, by, SCREEN_W, BOOK_BAR_H, COL_KEY_SPEC); keyOutlineRect(0, by, SCREEN_W, BOOK_BAR_H, 4);
+  tft.setTextDatum(textdatum_t::middle_center); tft.setTextColor(COL_TEXT, COL_KEY_SPEC);
+  tft.drawString("< Authors", SCREEN_W / 2, by + BOOK_BAR_H / 2);
 }
-static void booksPrev() {
-  if (pageSP > 0) booksShowPage(pageStack[--pageSP]);
+
+// ---- Reader ----
+static void booksShowPage(long off) {
+  curTop = off; tft.setRotation(0); tft.fillScreen(COL_BG);
+  String title = curBook; int sl = title.lastIndexOf('/'); if (sl >= 0) title = title.substring(sl + 1);
+  if (title.endsWith(".txt")) title = title.substring(0, title.length() - 4);
+  booksHeader(title); drawStrip();
+  File f = SD.open(curBook.c_str());
+  if (!f) { tft.setFont(&fonts::FreeSans9pt7b); tft.setTextColor(COL_TEXT, COL_BG); tft.setTextDatum(textdatum_t::top_left);
+            tft.drawString("Could not open this book.", 8, AREA_Y + 8); curNext = -1; }
+  else { curNext = booksRenderPage(f, off, true); f.close(); }
+  booksDrawBar(); bmSave(off);
 }
+
+static void booksOpen(const String& txtPath) { curBook = txtPath; pageSP = 0; booksMode = BM_READ; booksShowPage(bmLoad(txtPath)); }
+static void booksEnter() { curView = VIEW_KB; sdReady(); booksDrawAuthors(); }
+static void booksNext() { if (curNext >= 0) { if (pageSP < 160) pageStack[pageSP++] = curTop; booksShowPage(curNext); } }
+static void booksPrev() { if (pageSP > 0) booksShowPage(pageStack[--pageSP]); }
 
 static void booksTouchDown(int x, int y) { bkDownX = x; bkDownY = y; }
 
 static void booksTouchUp() {
   int by = SCREEN_H - BOOK_BAR_H;
-  if (booksMode == BM_LIST) {
-    // tap a book row
+  if (booksMode == BM_AUTHORS) {
     const int rowH = 42; int y0 = AREA_Y + 6;
-    if (bkDownY >= y0) {
-      int idx = (bkDownY - y0) / rowH;
-      if (idx >= 0 && idx < bookCount) booksOpen(bookNames[idx]);
-    }
+    if (bkDownY >= y0) { int idx = (bkDownY - y0) / rowH;
+      if (idx >= 0 && idx < authorCount) { curAuthor = authorNames[idx]; booksScanLibrary(); booksDrawLibrary(); } }
     return;
   }
-  // READ mode
-  if (bkDownY >= by) {                              // bottom bar
-    int bw = SCREEN_W / 4, i = bkDownX / bw;
+  if (booksMode == BM_LIBRARY) {
+    if (bkDownY >= by) { booksDrawAuthors(); return; }          // "< Authors"
+    for (int i = 0; i < libCount; i++) { int x, y, w, h; libCellRect(i, x, y, w, h);
+      if (bkDownX >= x && bkDownX < x + w && bkDownY >= y && bkDownY < y + h) { booksOpen(libTxt[i]); return; } }
+    return;
+  }
+  // READ
+  if (bkDownY >= by) { int bw = SCREEN_W / 4, i = bkDownX / bw;
     if      (i == 0) booksPrev();
-    else if (i == 1) { bmSave(curTop); /* flash */ tft.fillRect(bw, by, bw - 1, BOOK_BAR_H, COL_KEY_DOWN);
+    else if (i == 1) { bmSave(curTop); tft.fillRect(bw, by, bw - 1, BOOK_BAR_H, COL_KEY_DOWN);
                        tft.setTextDatum(textdatum_t::middle_center); tft.setFont(&fonts::FreeSans9pt7b);
                        tft.setTextColor(COL_TEXT, COL_KEY_DOWN); tft.drawString("Saved", bw + bw / 2, by + BOOK_BAR_H / 2); }
-    else if (i == 2) booksDrawList();
+    else if (i == 2) booksDrawLibrary();
     else             booksNext();
     return;
   }
-  // reading area: tap the right side to go forward, the left side to go back
-  if (bkDownY >= AREA_Y) {
-    if (bkDownX > SCREEN_W / 2) booksNext();
-    else                        booksPrev();
-  }
+  if (bkDownY >= AREA_Y) { if (bkDownX > SCREEN_W / 2) booksNext(); else booksPrev(); }
 }
 
 static void drawView() {
   if (homeOpen) { drawHome(); return; }
-  if (booksMode == BM_LIST) { booksDrawList(); return; }
-  if (booksMode == BM_READ) { booksShowPage(curTop); return; }
+  if (booksMode == BM_AUTHORS) { booksDrawAuthors(); return; }
+  if (booksMode == BM_LIBRARY) { booksDrawLibrary(); return; }
+  if (booksMode == BM_READ)    { booksShowPage(curTop); return; }
   if (curView == VIEW_QWERTY) { tft.setRotation(3); drawQwerty(); return; }  // landscape (flipped)
   tft.setRotation(0);          // every other screen is portrait (flipped 180° to match Marauder)
   drawTabs();
