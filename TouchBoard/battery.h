@@ -16,3 +16,4 @@ void     battery_update();         // sample once and fold into the average; cal
 uint16_t battery_millivolts();     // last smoothed CELL voltage in mV (post-divider), cached
 uint8_t  battery_percent();        // last 0..100 reading, cached (mapped to the Li-ion curve)
 bool     battery_present();        // false if the pin reads too low to be a real cell
+bool     battery_charging();       // true while on USB/charging (voltage rising, or held at float)

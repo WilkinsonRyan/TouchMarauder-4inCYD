@@ -236,16 +236,26 @@ static void drawGlyph(int cx, int cy, char code, uint16_t color) {
 // (themed via COL_TEXT so it reads on any skin), a proportional fill that goes
 // green -> amber -> red as it drains, and the percent to its left. Returns the
 // left-most x it painted so the strip can lay out other text without overlap.
+// A small lightning bolt centred at (cx,cy): yellow with a dark outline so it
+// reads over any fill colour. Shown only while charging.
+static void drawChargeBolt(int cx, int cy) {
+  tft.fillTriangle(cx + 4, cy - 8, cx - 5, cy + 2, cx + 1, cy + 1, 0x0000);
+  tft.fillTriangle(cx - 4, cy + 8, cx + 5, cy - 2, cx - 1, cy - 1, 0x0000);
+  tft.fillTriangle(cx + 3, cy - 7, cx - 4, cy + 1, cx + 0, cy + 1, 0xFFE0);
+  tft.fillTriangle(cx - 3, cy + 7, cx + 4, cy - 1, cx + 0, cy - 1, 0xFFE0);
+}
+
 static int drawBatteryGlyph() {
-  const int bw = 22, bh = 12, nub = 2, pad = 6;
+  const int bw = 30, bh = 15, nub = 3, pad = 6;   // horizontal battery, enlarged
   int cy = STRIP_Y + STRIP_H / 2;
   int bx = SCREEN_W - pad - nub - bw;   // shell left edge
   int by = cy - bh / 2;
 
   // shell + positive-terminal nub
   tft.drawRect(bx, by, bw, bh, COL_TEXT);
-  tft.fillRect(bx + bw, cy - 3, nub, 6, COL_TEXT);
-  tft.fillRect(bx + 1, by + 1, bw - 2, bh - 2, COL_TAB);   // clear interior to strip bg
+  tft.drawRect(bx + 1, by + 1, bw - 2, bh - 2, COL_TEXT);   // 2px border, easier to read
+  tft.fillRect(bx + bw, cy - 4, nub, 8, COL_TEXT);
+  tft.fillRect(bx + 2, by + 2, bw - 4, bh - 4, COL_TAB);    // clear interior to strip bg
 
   if (!battery_present()) {
     // no plausible cell on the pin: leave the shell empty, show a dash
@@ -261,6 +271,8 @@ static int drawBatteryGlyph() {
   int innerW = bw - 4;
   int fw = (innerW * pct + 50) / 100;
   if (fw > 0) tft.fillRect(bx + 2, by + 2, fw, bh - 4, fill);
+
+  if (battery_charging()) drawChargeBolt(bx + bw / 2, cy);   // ⚡ overlay while charging
 
   char pb[6];
   snprintf(pb, sizeof pb, "%d%%", pct);
@@ -1104,12 +1116,15 @@ void ui_tick(uint32_t now) {
   // moves — the gauge is smoothed, so this fires rarely.
   static uint32_t lastBatt    = 0;
   static uint8_t  lastBattPct = 255;
+  static bool     lastChg     = false;
   if (now - lastBatt > 15000) {
     lastBatt = now;
     battery_update();
     uint8_t pct = battery_percent();
-    if (pct != lastBattPct) {
+    bool chg = battery_charging();
+    if (pct != lastBattPct || chg != lastChg) {  // % moved, or the bolt appeared/vanished
       lastBattPct = pct;
+      lastChg = chg;
       hidkb_setBattery(pct);                     // keep the paired host in sync
       if (curView != VIEW_QWERTY) drawStrip();   // refresh the on-screen glyph
     }

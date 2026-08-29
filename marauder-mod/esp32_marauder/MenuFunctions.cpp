@@ -1407,17 +1407,50 @@ void MenuFunctions::batteryCYD(bool initial)
   else if (mv <= cv[9]) pct = 0;
   else { pct = 0; for (int i = 0; i < 9; i++) { if (mv <= cv[i] && mv >= cv[i+1]) { float f = (float)(mv - cv[i+1]) / (cv[i] - cv[i+1]); pct = (int)(cp[i+1] + f * (cp[i] - cp[i+1]) + 0.5f); break; } } }
 
-  if (!initial && pct == last_pct) return;   // nothing to repaint
-  last_pct = pct;
+  // Charge detection (no charge-status pin on this board): the TP4054 holds the
+  // cell at ~4.2V float while on USB, which this always-loaded board can't do
+  // unplugged; a rising trend catches the earlier CC phase. Trend is sampled on
+  // a slow (~8s) cadence so it survives the frequent redraws.
+  static float    prev_ema   = 0.0f;
+  static uint32_t last_trend = 0;
+  static bool     charging   = false;
+  static int      last_chg   = -1;
+  uint32_t nowm = millis();
+  if (last_trend == 0) { prev_ema = ema_mv; last_trend = nowm; charging = (ema_mv >= 4200.0f); }
+  else if (nowm - last_trend >= 8000) {
+    float d = ema_mv - prev_ema;
+    if      (d >=  4.0f) charging = true;
+    else if (d <= -4.0f) charging = false;
+    else                 charging = (ema_mv >= 4200.0f);
+    prev_ema = ema_mv; last_trend = nowm;
+  }
+
+  if (!initial && pct == last_pct && (int)charging == last_chg) return;   // nothing to repaint
+  last_pct = pct; last_chg = (int)charging;
 
   uint16_t color = pct < 20 ? TFT_RED : pct < 40 ? TFT_YELLOW : TFT_GREEN;
+  TFT_eSPI& t = display_obj.tft;
 
-  const int bx = 240;   // battery icon x — just right of the SD icon (x=220, 16px wide)
-  const int tx = 258;   // percent text x
-  display_obj.tft.fillRect(bx, 0, 90, STATUS_BAR_WIDTH, STATUSBAR_COLOR);
-  display_obj.tft.drawXBitmap(bx, 0, menu_icons[STATUS_BAT], 16, 16, STATUSBAR_COLOR, color);
-  display_obj.tft.setTextColor(color, STATUSBAR_COLOR);
-  display_obj.tft.drawString((String)pct + "%", tx, 0, 2);
+  // Horizontal battery, drawn right of the SD icon (SD at x=220, 16px wide).
+  const int bx = 240, by = 1, bw = 28, bh = 13, nub = 2;   // body + terminal nub
+  const int tx = bx + bw + nub + 6;                        // percent text x
+  int cx = bx + bw / 2, cy = by + bh / 2;
+  t.fillRect(bx, 0, 90, STATUS_BAR_WIDTH, STATUSBAR_COLOR);   // clear the old glyph + digits
+  t.drawRect(bx, by, bw, bh, color);
+  t.drawRect(bx + 1, by + 1, bw - 2, bh - 2, color);          // 2px shell, reads at a glance
+  t.fillRect(bx + bw, cy - 3, nub, 6, color);                 // + terminal
+  int fw = ((bw - 4) * pct + 50) / 100;                       // proportional fill
+  if (fw > 0) t.fillRect(bx + 2, by + 2, fw, bh - 4, color);
+
+  if (charging) {   // lightning bolt overlay (yellow, dark outline) while charging
+    t.fillTriangle(cx + 4, cy - 7, cx - 5, cy + 2, cx + 1, cy + 1, TFT_BLACK);
+    t.fillTriangle(cx - 4, cy + 7, cx + 5, cy - 2, cx - 1, cy - 1, TFT_BLACK);
+    t.fillTriangle(cx + 3, cy - 6, cx - 4, cy + 1, cx + 0, cy + 1, TFT_YELLOW);
+    t.fillTriangle(cx - 3, cy + 6, cx + 4, cy - 1, cx + 0, cy - 1, TFT_YELLOW);
+  }
+
+  t.setTextColor(color, STATUSBAR_COLOR);
+  t.drawString((String)pct + "%", tx, 0, 2);
 }
 
 void MenuFunctions::updateStatusBar()

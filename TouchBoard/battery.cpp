@@ -21,6 +21,18 @@ static float    ema_mv   = 0.0f;   // smoothed CELL millivolts
 static bool     seeded   = false;
 static uint8_t  last_pct = 0;
 
+// ---- charge detection (no charge-status pin on this board) ----
+// The TP4054 charger holds the cell at its float voltage (~4.2V) while on USB.
+// Under this board's constant ~150mA+ load an UNplugged cell can't sit that
+// high, so a sustained reading at/above CHG_HOLD_MV means "on charger". We also
+// flag charging when the voltage is clearly climbing (the CC phase, before it
+// reaches float). Best-effort: with only a voltage divider there's no way to
+// know "charge complete" vs "topped off and still plugged".
+static const float    CHG_HOLD_MV = 4200.0f;  // held here under load => on charger
+static const float    CHG_RISE_MV = 4.0f;     // rise between updates => charging
+static float    prev_ema = 0.0f;
+static bool     charging = false;
+
 // Li-ion (single cell) resting/light-load discharge curve: {cell mV, percent}.
 // Voltages between points are linearly interpolated. Deliberately conservative
 // at the top (a "full" cell sits ~4.15-4.20 under no load) and steep at the
@@ -73,8 +85,10 @@ void battery_begin() {
   analogSetPinAttenuation(PIN_VBAT, ADC_11db);
   uint16_t mv = sampleCellMv();
   ema_mv   = mv;
+  prev_ema = mv;
   seeded   = (mv > PRESENT_MV);
   last_pct = mvToPct(mv);
+  charging = (ema_mv >= CHG_HOLD_MV);
 #ifdef VBAT_DEBUG
   Serial.printf("[batt] init cell=%umV pct=%u (pin %d, /%.2f, trim %.3f)\n",
                 mv, last_pct, PIN_VBAT, (double)VBAT_DIVIDER, (double)VBAT_TRIM);
@@ -87,15 +101,25 @@ void battery_begin() {
 // from a mid-frame re-sample.
 void battery_update() {
   uint16_t mv = sampleCellMv();
-  if (!seeded) { ema_mv = mv; seeded = (mv > PRESENT_MV); }
+  if (!seeded) { ema_mv = mv; prev_ema = mv; seeded = (mv > PRESENT_MV); }
   else         { ema_mv += EMA_ALPHA * (mv - ema_mv); }
   last_pct = mvToPct((uint16_t)(ema_mv + 0.5f));
+
+  // Charge state: rising => charging (CC phase); held at float => on charger;
+  // clearly falling or sitting low => running on battery. Flat-but-below-float
+  // keeps whatever it was only if still high, else off.
+  float delta = ema_mv - prev_ema;
+  if      (delta >=  CHG_RISE_MV) charging = true;
+  else if (delta <= -CHG_RISE_MV) charging = false;
+  else                            charging = (ema_mv >= CHG_HOLD_MV);
+  prev_ema = ema_mv;
 #ifdef VBAT_DEBUG
-  Serial.printf("[batt] cell=%umV ema=%umV pct=%u\n",
-                mv, (uint16_t)(ema_mv + 0.5f), last_pct);
+  Serial.printf("[batt] cell=%umV ema=%umV pct=%u chg=%d\n",
+                mv, (uint16_t)(ema_mv + 0.5f), last_pct, charging ? 1 : 0);
 #endif
 }
 
 uint16_t battery_millivolts() { return (uint16_t)(ema_mv + 0.5f); }
 uint8_t  battery_percent()    { return last_pct; }
 bool     battery_present()    { return seeded && ema_mv > PRESENT_MV; }
+bool     battery_charging()   { return seeded && charging; }
