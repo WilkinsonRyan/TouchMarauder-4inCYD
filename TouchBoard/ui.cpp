@@ -1726,7 +1726,13 @@ static void runScreensaver() {
 
 void ui_tick(uint32_t now) {
   if (now - ss_last_activity > 25000) { runScreensaver(); return; }   // idle screensaver
-  if (booksMode == BM_LIBRARY) { booksMarqueeTick(now); return; }     // scroll long book titles
+  // While any launcher app / overlay is showing, don't run keyboard-view tick
+  // work (the Hacker rain re-stamps keyboard keys and would paint them over the
+  // overlay). Only the Books library needs its title marquee.
+  if (homeOpen || settingsOpen || sbActive || booksMode != BM_NONE) {
+    if (booksMode == BM_LIBRARY) booksMarqueeTick(now);
+    return;
+  }
   tbHackerRain(now);   // live rain behind the Hacker keyboard (no-op in other themes/views)
   // T9: multi-tap window expired -> commit the candidate.
   // (Long-press-for-digit was removed: this panel holds "finger down" well
